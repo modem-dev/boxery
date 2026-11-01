@@ -1280,6 +1280,7 @@ export function guidance(current, { localToolsNote, host } = {}) {
 		`Grants the user already gave this VM are set up in login shells (vm_info {action:'grants'} lists them). ${CREDENTIALS}`,
 		`Servers in the VM are reachable from the user's machine with \`boxery forward ${current} PORT\`.`,
 		"Before a risky change, snapshot the VM (vm_manage snap; revert restores it). For parallel attempts, fork it (vm_manage fork, to:[...]): copies get the disk, not running processes; remove them when done.",
+		"Resource pressure looks like flakiness: if a process is Killed (exit 137) or tests time out or run far slower than expected, check memory, OOM kills and load (`free -m`, `grep oom_kill /proc/vmstat`, `nproc` vs `uptime`) before calling it flaky. If the VM is too small, tell the user: vm_manage resize grows it but restarts it, so ask first.",
 		whenVm(remote),
 	].join("\n");
 }
