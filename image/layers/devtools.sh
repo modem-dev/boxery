@@ -10,7 +10,7 @@ export DEBIAN_FRONTEND=noninteractive
 # shellcheck source=/dev/null
 . /usr/local/lib/boxery/layers/lib.sh
 
-pkgs git jq ripgrep fd-find build-essential python3 python3-venv zip unzip ca-certificates gnupg curl
+pkgs git jq ripgrep fd-find build-essential python3 python3-venv rsync zip unzip ca-certificates gnupg curl
 
 # git from the git-core PPA (Ubuntu Git Maintainers): Ubuntu keeps one git per release (24.04: 2.43), while
 # laptops and CI runners track upstream, and agents shouldn't hit bugs only an old git has. Ubuntu only;
