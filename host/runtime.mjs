@@ -37,9 +37,16 @@ export function createRuntime(env = process.env) {
 		waitSsh: (name, ep, tries) => {
 			/** @type {string | null} */
 			let keyProblem = null;
+			// ssh is probed every 250 ms. Until a key is pinned, look for one on every probe (ssh can't succeed
+			// without it); after that, refresh it (boat's API) at most every 2 s.
+			let pinnedAt = -Infinity;
 			return rt.guest.waitSsh(ep, tries,
 				async () => (await rt.vms.endpointProblem(name)) ?? (keyProblem ? { fatal: false, message: keyProblem } : null),
-				async () => { keyProblem = await ensureHostKey(rt, name, ep); });
+				async () => {
+					if (performance.now() - pinnedAt < 2000) return;
+					keyProblem = await ensureHostKey(rt, name, ep);
+					if (!keyProblem) pinnedAt = performance.now();
+				});
 		},
 		db: () => (db ??= leases.open(path.join(config.conf, "leases.db"))),
 		close: () => db?.close(),

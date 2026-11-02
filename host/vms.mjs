@@ -101,21 +101,29 @@ export async function createVm(rt, { name, shape, cpus, mem, disk, from, headles
 		fail(`no base image; run: boxery-host build-base (or: new ${name} --headless, which needs none)`);
 	}
 	const t0 = Date.now(), secs = () => Math.floor((Date.now() - t0) / 1000);
+	// Opt-in diagnostics stay on stderr and never include seed contents, tokens or SSH commands.
+	const step = async (stage, fn) => {
+		if (rt.env?.BOXERY_TIMINGS !== "1") return fn();
+		const start = performance.now();
+		let ok = false;
+		try { const result = await fn(); ok = true; return result; }
+		finally { process.stderr.write(`[boxery-timing] ${JSON.stringify({ vm: name, stage, ms: Math.round(performance.now() - start), ok })}\n`); }
+	};
 	const action = rt.intent("create", name);
 	// Restricted workloads have no root provisioning, guest SSH keys or Boxery proxy token.
-	const userdata = rt.backend === "openshell" ? "" : await writeSeed(rt, name, provision);
-	await rt.vms.call("backend_new", [name, cpus, mem, disk, userdata, src]);
+	const userdata = rt.backend === "openshell" ? "" : await step("seed", () => writeSeed(rt, name, provision));
+	await step("backend-new", () => rt.vms.call("backend_new", [name, cpus, mem, disk, userdata, src]));
 	createVmRecord(rt.db(), name, { kind, os, size: rt.backend === "openshell" ? null : { shape: label, cpus, mem, disk } });
-	const ep = await rt.vms.waitEndpoint(name);
+	const ep = await step("endpoint", () => rt.vms.waitEndpoint(name));
 	log(rt.backend === "openshell" ? `${name}: waiting for restricted gateway SSH` : `${name} reachable at ${ep.host}:${ep.port}; waiting for ssh + cloud-init${provision ? ` (installing ${provision})` : ""}`);
-	await rt.waitSsh(name, ep);
+	await step("ssh", () => rt.waitSsh(name, ep));
 	if (rt.backend === "openshell") {
 		await mustRun(rt, ep, `test "$(id -u)" != 0 && test "$HOME" = ${linux.home} && test -d ${linux.project} && test -f ${linux.configDir}/headless || exit 1; for tool in bash node tar python3 setsid file git tmux; do command -v "$tool" >/dev/null || exit 1; done`);
 		rt.done(action);
 		log(`${name} ready (restricted headless; policy and credentials managed by OpenShell)`);
 		return `${name} ${ep.host}:${ep.port}`;
 	}
-	await mustRun(rt, ep, "cloud-init status --wait >/dev/null 2>&1; true");
+	await step("cloud-init", () => mustRun(rt, ep, "cloud-init status --wait >/dev/null 2>&1; true"));
 	if (provision) {
 		if (await rt.guest.run(ep, "test -f /var/log/boxery-provision.ok") !== 0) {
 			await rt.guest.run(ep, "sudo tail -30 /var/log/boxery-provision.log");
@@ -130,7 +138,7 @@ export async function createVm(rt, { name, shape, cpus, mem, disk, from, headles
 		try { await setPetKeys(rt, name); } catch { fail(`could not reset ssh keys on ${name}`); }
 		await rt.guest.run(ep, `rm -rf "${linux.grantsDir}"`);
 	}
-	if (kind === "desktop" && await rt.guest.run(ep, NOVNC) !== 0) log("warning: noVNC not answering yet");
+	if (kind === "desktop" && await step("desktop", () => rt.guest.run(ep, NOVNC)) !== 0) log("warning: noVNC not answering yet");
 	await refreshBuild(rt, name, ep); // what it was built with (from an image or fork: its source's software)
 	rt.done(action);
 	log(`${name} ready (${kind}, ${secs()}s)`);

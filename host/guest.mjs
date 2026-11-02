@@ -77,7 +77,8 @@ export function createGuest({ conf, env = process.env }) {
 		registeredKeys,
 		/** Pet VMs accept the host and every registered controller. */
 		petKeys: () => [...new Set([hostPubkey(), ...registeredKeys()])].filter(Boolean).sort(),
-		/** Wait until sshd answers. tries × 2 s (BOXERY_SSH_WAIT_TRIES, default 180 = 6 min). problem: async
+		/** Wait until sshd answers. Keep the legacy tries × 2 s budget (BOXERY_SSH_WAIT_TRIES,
+		 *  default 180 ≈ 6 min), but probe every 250 ms rather than adding up to 2 s to every boot. problem: async
 		 *  () => null | {fatal, message}, asked after each failed try: give up at once when it is fatal (there
 		 *  is no way in), and say why on a timeout. prepare: run before each try.
 		 *  @param {GuestEndpoint} ep @param {number} [tries] @param {() => Promise<EndpointProblem | null>} [problem]
@@ -85,12 +86,14 @@ export function createGuest({ conf, env = process.env }) {
 		async waitSsh(ep, tries = Number(env.BOXERY_SSH_WAIT_TRIES || 180), problem = async () => null, prepare = async () => {}) {
 			/** @type {EndpointProblem | null} */
 			let why = null;
-			for (let i = 0; i < tries; i++) {
+			const deadline = performance.now() + Math.max(0, tries - 1) * 2000;
+			for (let first = true; tries > 0 && (first || performance.now() < deadline); first = false) {
 				await prepare(); // e.g. pin the VM's host key once it can be read (hostkeys.mjs)
 				if (await run(ep, "true", { quiet: true }) === 0) return;
 				why = await problem();
 				if (why?.fatal) throw new Error(why.message);
-				if (i < tries - 1) await sleep(2000);
+				const remaining = deadline - performance.now();
+				if (remaining > 0) await sleep(Math.min(250, remaining));
 			}
 			throw new Error(`timed out waiting for ssh on ${ep.host}:${ep.port}${why?.message ? `: ${why.message}` : ""}`);
 		},
