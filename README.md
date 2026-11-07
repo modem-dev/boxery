@@ -120,7 +120,7 @@ Then spin up a VM with `boxery new demo` and open its desktop.
 Or by hand, on a Mac:
 
 ```bash
-brew install lima jq node
+brew install lima jq node   # jq: the Lima backend reads limactl's JSON with it
 npm install -g boxery-vm
 boxery-host init --backend lima && boxery-host build-base
 boxery setup local

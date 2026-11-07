@@ -7,10 +7,11 @@
 // checks pass through, and may ask); a tool's captures everything as text and never shares stdio (MCP's
 // stdout is its protocol), so nothing asks.
 import { spawn } from "node:child_process";
-import { accessSync, closeSync, existsSync, constants as fsConstants, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, existsSync, constants as fsConstants, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { constants, homedir } from "node:os";
 import path from "node:path";
 import { BOXERY_HOME, defaultHost, resolveHost } from "./boxery-core.mjs";
+import { writeAtomic } from "./fsutil.mjs";
 import { hostRun, profileConfig, stopHostCommands, writeSshConfig } from "./profile.mjs";
 import { DEFAULT_HOST_BIN, VALID_DEST, checkTarget, literal, localHostBin, remotePath, sshIncludeValue } from "./ssh-config.mjs";
 /** @import { HostProfile } from "./boxery-core.mjs" */
@@ -47,11 +48,7 @@ const present = (p) => { try { lstatSync(p); return true; } catch { return false
 /** @param {string} p */
 const plainPath = (p) => (/[\n\t\r]/.test(p) ? fail("paths cannot contain line breaks or tabs") : p);
 /** Write FILE whole (rename), so readers never see half of it. @param {string} file @param {string} text */
-function publish(file, text) {
-	const tmp = `${file}.tmp.${process.pid}`;
-	writeFileSync(tmp, text);
-	renameSync(tmp, file);
-}
+const publish = (file, text) => writeAtomic(file, text);
 /** The default host, its registration checked as a strict one-line data file (an error if malformed). */
 export function checkedDefault() {
 	const def = defaultHost();

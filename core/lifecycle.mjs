@@ -6,8 +6,8 @@
 // Approval of grants (new --grant, fork --grants) belongs to the front-ends; these take approved specs.
 import { rmSync } from "node:fs";
 import path from "node:path";
-import { assertName, currentHost } from "./boxery-core.mjs";
-import { addGrants, applyGrants, listGrants } from "./grant-operations.mjs";
+import { VALID_NAME, assertImage, assertName, assertSnap, currentHost } from "./boxery-core.mjs";
+import { addGrants, listGrants, reapplyPushed } from "./grant-operations.mjs";
 import { closeMaster, hostRun, profileConfig, writeSshConfig } from "./profile.mjs";
 /** @import { GrantSpec } from "./boxery-core.mjs" */
 /** @import { HostRunOpts } from "./profile.mjs" */
@@ -16,15 +16,8 @@ import { closeMaster, hostRun, profileConfig, writeSshConfig } from "./profile.m
  *  grant re-apply). say: results beside the host's (what granting or re-applying grants did; default: log).
  *  @typedef {Pick<HostRunOpts, "signal" | "timeout" | "stdin" | "stdout" | "stderr" | "onData"> & { log?: (line: string) => void, say?: (line: string) => void }} LifecycleOpts */
 
-const PUSHED = new Set(["env", "file", "http", "llm"]);
-const VALID_SNAP = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const VALID_IMAGE = /^[a-z][a-z0-9-]{0,30}@[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-
 /** @param {string | undefined | null} s */
-export function needSnap(s) {
-	if (typeof s !== "string" || !VALID_SNAP.test(s)) throw new Error(`invalid snapshot name: ${s ?? ""}`);
-	return s;
-}
+const needSnap = (s) => assertSnap(s);
 
 /** boxery-host ARGS for lifecycle: diagnostics pass through like the CLI's (stderr) unless piped.
  *  @param {string[]} args @param {LifecycleOpts} [opts] */
@@ -34,14 +27,8 @@ const sayer = (opts) => opts.say ?? opts.log;
 
 /** Pushed (tmpfs) grants are gone after a restart: push them again. quiet: only boxery: lines are logged.
  *  Never fails the operation. @param {string} vm @param {LifecycleOpts} opts @param {{ always?: boolean, quiet?: boolean }} [how] */
-async function reapply(vm, opts, { always = false, quiet = true } = {}) {
-	try {
-		if (!always && !listGrants(vm).some((g) => PUSHED.has(g.kind))) return;
-		const out = await applyGrants(vm, { interactiveCommands: opts.stdin === "inherit" });
-		if (!quiet) sayer(opts)?.(out);
-		else for (const line of out.split("\n")) if (line.startsWith("boxery:")) opts.log?.(line);
-	} catch (e) { opts.log?.(`boxery: ${/** @type {Error} */ (e).message}`); }
-}
+const reapply = (vm, opts, { always = false, quiet = true } = {}) =>
+	reapplyPushed(vm, { always, interactiveCommands: opts.stdin === "inherit", log: (l) => opts.log?.(l), say: quiet ? undefined : (t) => sayer(opts)?.(t) });
 
 /** A VM operation that restarts or replaces it: its shared connection is stale before and after.
  *  @param {string} vm @param {string[]} args @param {LifecycleOpts} opts */
@@ -52,10 +39,10 @@ async function around(vm, args, opts) {
 
 /** Shape and size flags for new/fork/resize (validated: they reach the host as argv).
  *  @param {{ shape?: string | null, cpus?: number | string | null, mem?: number | string | null, disk?: number | string | null }} s */
-export function sizeArgs({ shape, cpus, mem, disk }) {
+function sizeArgs({ shape, cpus, mem, disk }) {
 	const out = [];
 	if (shape != null && shape !== "") {
-		if (!/^[a-z][a-z0-9-]{0,30}$/.test(shape)) throw new Error(`invalid shape name: ${shape}`);
+		if (!VALID_NAME.test(shape)) throw new Error(`invalid shape name: ${shape}`);
 		out.push("--shape", shape);
 	}
 	for (const [k, v] of Object.entries({ cpus, mem, disk })) {
@@ -73,7 +60,7 @@ export function sizeArgs({ shape, cpus, mem, disk }) {
  */
 export async function newVm(name, { from, headless, layers, grants = [], ...size } = {}, opts = {}) {
 	assertName(name);
-	if (from != null && !VALID_IMAGE.test(from)) throw new Error(`invalid image name: ${from} (use VM@SNAP)`);
+	if (from != null) assertImage(from);
 	if (layers != null && !/^[a-z0-9,-]+$/.test(layers)) throw new Error(`invalid layer list: ${layers}`);
 	const out = await host(["new", name, ...(headless ? ["--headless"] : []), ...(layers != null ? ["--layers", layers] : []), ...sizeArgs(size), ...(from ? ["--from", from] : [])], opts);
 	if (grants.length) sayer(opts)?.(await addGrants(name, grants, { interactiveCommands: opts.stdin === "inherit" }));
@@ -161,7 +148,7 @@ export async function pinVm(name, { fromGuest = false } = {}, opts = {}) {
  *  @param {string[]} args @param {LifecycleOpts} [opts] */
 export async function pool(args, opts = {}) {
 	const vm = args[1];
-	if (vm && /^[a-z][a-z0-9-]{0,30}$/.test(vm)) return around(vm, ["pool", ...args], opts);
+	if (vm && VALID_NAME.test(vm)) return around(vm, ["pool", ...args], opts);
 	return host(["pool", ...args], opts);
 }
 
@@ -175,14 +162,12 @@ export async function patch(args, opts = {}) {
 	let names;
 	if (first === "--all") {
 		// (Which VMs it may restart: their connections and grants are renewed after. A failed listing ends here.)
-		const listing = await hostRun(["ls"], { timeout: 120_000 });
-		names = listing.split("\n").slice(1).map((l) => l.trim().split(/\s+/)).filter(([n, st]) => n && st === "running").map(([n]) => n);
+		names = (await listVms()).filter((v) => v.state === "running").map((v) => /** @type {string} */ (v.name));
 	} else names = [assertName(first)];
 	for (const n of names) await closeMaster(n);
 	try { return await host(["patch", ...args], opts); }
 	finally {
 		for (const n of names) {
-			if (!/^[a-z][a-z0-9-]{0,30}$/.test(n)) continue;
 			await closeMaster(n);
 			await reapply(n, opts);
 		}
@@ -194,16 +179,16 @@ export async function patch(args, opts = {}) {
 export async function listVms({ refresh = false } = {}, opts = {}) {
 	const out = await hostRun(["ls", "--json", ...(refresh ? ["--refresh"] : [])], { timeout: 120_000, signal: opts.signal, stderr: opts.stderr });
 	if (!out.startsWith("[")) throw new Error(`host returned no JSON for 'ls --json' (update boxery-host on ${(await profileConfig()).host})`);
-	/** @type {Array<Record<string, unknown> & { name: string }>} */
+	/** @type {Array<Record<string, unknown> & { name: string, state?: string }>} */
 	const rows = JSON.parse(out);
 	return rows.map((r) => {
-		if (!/^[a-z][a-z0-9-]{0,30}$/.test(r.name)) throw new Error(`bad VM name from host: ${r.name}`);
+		if (!VALID_NAME.test(r.name)) throw new Error(`bad VM name from host: ${r.name}`);
 		return { ...r, grants: listGrants(r.name) };
 	});
 }
 
 /** One line of `boxery ls`: VM NAME's grants, short (env:VAR,file:PATH,…), or "-". @param {string} name */
-export function grantSummary(name) {
+function grantSummary(name) {
 	return listGrants(name).map((g) => g.kind === "env" ? `env:${g.var}` : g.kind === "file" ? `file:${g.remote?.replace(/^\/home\/agent\//, "")}` : g.kind === "http" ? `http:${g.host}` : g.kind === "llm" ? `llm:${g.provider}` : g.kind).join(",") || "-";
 }
 
@@ -212,7 +197,7 @@ export async function listTable({ refresh = false } = {}, opts = {}) {
 	const out = await hostRun(["ls", ...(refresh ? ["--refresh"] : [])], { timeout: 120_000, signal: opts.signal, stderr: opts.stderr, raw: true });
 	return out.split("\n").filter((l) => l.length).map((line) => {
 		const n = line.split(" ")[0];
-		const col = n === "NAME" ? "GRANTS" : /^[a-z][a-z0-9-]{0,30}$/.test(n) ? grantSummary(n) : "-";
+		const col = n === "NAME" ? "GRANTS" : VALID_NAME.test(n) ? grantSummary(n) : "-";
 		return `${line.padEnd(100)} ${col}`;
 	}).join("\n");
 }

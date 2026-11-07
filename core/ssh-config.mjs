@@ -81,7 +81,7 @@ export function renderSshConfig(p) {
 // caller sources the file with bash instead: then any effect on the environment is the shell's own.
 
 /** The settings a parsed config may set; any other name (PATH, HOME, IFS, exports…) means: source it. */
-export const CONFIG_VARS = ["HOST", "HOST_BIN", "HOST_PROFILE", "IDENTITY", "GRANT_CONFIRM"];
+const CONFIG_VARS = ["HOST", "HOST_BIN", "HOST_PROFILE", "IDENTITY", "GRANT_CONFIRM"];
 
 /** One shell word as setup writes it ('…' with '\'' for quotes, "…" without expansions, or plain), or null.
  *  @param {string} s */

@@ -24,7 +24,7 @@ export const validNum = (flag, v) => (/^[0-9]+$/.test(v ?? "") ? /** @type {stri
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const log = (/** @type {string} */ message) => process.stderr.write(`==> ${message}\n`);
 export const print = (/** @type {string} */ text) => process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
-// One element per line: still plain JSON, and the controller (which has no jq) relies on it.
+// One element per line: still plain JSON, and a promise to scripts (docs/cli.md) that read it line by line.
 export const jsonArray = (/** @type {unknown[]} */ items) => (items.length ? `[\n${items.map((i) => JSON.stringify(i)).join(",\n")}\n]` : "[]");
 // printf-style columns: width N = %-Ns, -N = %Ns, no width = %s
 /** @param {Array<number | null | undefined>} widths @param {unknown[][]} rows */

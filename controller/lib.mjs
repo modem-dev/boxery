@@ -23,10 +23,10 @@ export const say = (text) => { process.stdout.write(text.endsWith("\n") ? text :
 /** A line on stderr, as is. @param {string} text */
 export const note = (text) => { process.stderr.write(text.endsWith("\n") ? text : `${text}\n`); };
 
-export const VALID_VM = /^[a-z][a-z0-9-]{0,30}$/;
+export { VALID_NAME as VALID_VM, VALID_SNAP } from "../core/boxery-core.mjs";
+import { VALID_NAME as VALID_VM } from "../core/boxery-core.mjs";
 /** @param {string | undefined} name @returns {string} */
 export const needVm = (name) => (VALID_VM.test(name ?? "") ? /** @type {string} */ (name) : die(`invalid VM name: ${name ?? ""}`));
-export const VALID_SNAP = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** VALUE as a plain number (no leading zeros), at least MIN. @param {string} flag @param {string | undefined} value @param {number} [min] */
 export function num(flag, value, min = 0) {
@@ -89,7 +89,7 @@ export let killedBy = null;
 // (controller/boxery) passes the whole command line as BOXERY_ARGV (each argument's bytes, NUL-terminated,
 // base64) and says so with ARGV_FROM_ENV in place of the arguments. The bytes are kept by position: two
 // arguments can decode to the same string (both U+FFFD) and still differ.
-export const ARGV_FROM_ENV = "--boxery-argv-from-env";
+const ARGV_FROM_ENV = "--boxery-argv-from-env";
 /** The command line's arguments as bytes, by position. @type {Buffer[]} */
 let RAW = [];
 /** The command line (bytes decoded as UTF-8). BOXERY_ARGV is read only when the shim says it set it. @returns {string[]} */

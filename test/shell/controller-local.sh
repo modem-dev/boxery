@@ -266,10 +266,12 @@ exec sh -c "\$*"
 STUB2
 chmod +x "$tmp/bin/sshjoin"
 rm -f "$tmp/pwned"
-( ssh() { "$tmp/bin/sshjoin" "$@"; }; export -f ssh
-  . /dev/stdin <<<"$(sed -n '/^literal()/p; /^literal_args()/p' "$ROOT/test/fixtures/bash-profile.sh")"
-  cmdline="echo $(literal_args snap w2 "x; touch $tmp/pwned #")"
-  sh -c "$cmdline" >/dev/null )
+# (the command the CLI sends a remote host: core/ssh-config.mjs's remoteCommand, joined by ssh, run by sh)
+cmdline=$(node --input-type=module -e '
+	const { remoteCommand } = await import(process.argv[1]);
+	process.stdout.write(remoteCommand({ hostBin: "echo" }, ["snap", "w2", process.argv[2]]));
+' "$ROOT/core/ssh-config.mjs" "x \$(touch $tmp/pwned); touch $tmp/pwned #")
+"$tmp/bin/sshjoin" -T user@host "$cmdline" >/dev/null 2>&1
 [ ! -e "$tmp/pwned" ] && ok "remote transport quotes every argument" || bad "INJECTION via remote transport"
 "$A" rm w2 >/dev/null 2>&1 || true
 

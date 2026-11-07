@@ -5,14 +5,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { JOBS_NODE, VALID_JOB } from "../core/boxery-core.mjs";
 import { closeMaster } from "../core/profile.mjs";
 import { CliError, die, duration, needVm, note, num, quit, say, vmSsh, vmSshCapture, warn } from "./lib.mjs";
 /** @import { Selected } from "./lib.mjs" */
 
-// Probe for type stripping instead of matching versions (it arrived in 22.18 and 23.6, not 23.0).
-const JOBS_NODE = `T="--experimental-strip-types --disable-warning=ExperimentalWarning --input-type=module-typescript"
-node $T -e "" >/dev/null 2>&1 || { echo "boxery jobs: need Node >= 22.18 in the VM (found: $(node -v 2>/dev/null || echo none))" >&2; exit 1; }
-BOXERY_CALLER=$PPID exec node $T -`;
 
 /** core/boxery-jobs.ts next to this controller (BOXERY_JOBS_TS overrides). */
 function jobsTs() {
@@ -36,9 +33,8 @@ const jobsVmCapture = (s, name, args) => vmSshCapture(s, helper(name, args), rea
 /** @param {number} rc */
 const exit = (rc) => { if (rc) throw new CliError("", rc); };
 
-const VALID_JOB = /^job-[a-z0-9-]+$/;
 /** @param {string | undefined} id */
-const needJob = (id) => (VALID_JOB.test(id ?? "") && /** @type {string} */ (id).length <= 40 ? /** @type {string} */ (id) : die(`invalid job id: ${id ?? ""} (see: boxery jobs NAME)`));
+const needJob = (id) => (VALID_JOB.test(id ?? "") ? /** @type {string} */ (id) : die(`invalid job id: ${id ?? ""} (see: boxery jobs NAME)`));
 
 /** run --bg: start ARGV (each word's bytes) in the VM as a job, in CWD (bytes, or null: ~/project); its id.
  *  @param {Selected} s @param {string} name @param {Buffer[]} argv @param {Buffer | null} cwd */

@@ -13,14 +13,7 @@ const SETUP = 'if test -e /etc/boxery/headless; then echo headless\nelif command
 
 /** The first free local TCP port from START. @param {number} start */
 export async function freePort(start) {
-	for (let p = start; p < start + 1000; p++) {
-		const free = await new Promise((resolve) => {
-			const sock = net.connect({ port: p, host: "127.0.0.1" });
-			sock.once("connect", () => { sock.destroy(); resolve(false); });
-			sock.once("error", () => resolve(true));
-		});
-		if (free) return p;
-	}
+	for (let p = start; p < start + 1000; p++) if (await freePortAt(p)) return p;
 	throw new Error(`no free local port from ${start}`);
 }
 

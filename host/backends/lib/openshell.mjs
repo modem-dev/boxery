@@ -8,11 +8,12 @@ import { shellQuote as q } from "../../util.mjs";
 import { OPENSHELL_NAMESPACE_LABEL, openShellNamespace, openShellProviders } from "../../openshell-config.mjs";
 
 const env = { ...process.env };
-const gateway = env.BOXERY_OPENSHELL_GATEWAY;
+const gateway = env.BOXERY_OPENSHELL_GATEWAY ?? "";
 const workspace = env.BOXERY_OPENSHELL_WORKSPACE || "default";
-const prefix = env.BOXERY_OPENSHELL_PREFIX;
-const owner = openShellNamespace(prefix || "");
+const prefix = env.BOXERY_OPENSHELL_PREFIX ?? "";
+const owner = openShellNamespace(prefix);
 const namePattern = /^[a-z][a-z0-9-]{0,30}$/;
+/** @param {string | undefined} value @param {string} name @returns {string} */
 function required(value, name) { if (!value || /[\r\n\0]/.test(value)) throw new Error(`set ${name}`); return value; }
 function validateConfig() {
 	required(gateway, "BOXERY_OPENSHELL_GATEWAY (a registered gateway name)");
@@ -23,20 +24,25 @@ function validateConfig() {
 // Do not let inherited OpenShell variables select a different gateway or weaken TLS verification.
 for (const key of ["OPENSHELL_GATEWAY", "OPENSHELL_GATEWAY_ENDPOINT", "OPENSHELL_GATEWAY_INSECURE", "OPENSHELL_WORKSPACE", "OPENSHELL_SANDBOX_POLICY"]) delete env[key];
 const common = ["--gateway", gateway, "--workspace", workspace];
+/** @param {string[]} args @param {{ capture?: boolean }} [opts] */
 function cli(args, { capture = false } = {}) {
 	const r = spawnSync("openshell", [...common, ...args], { env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", capture ? "pipe" : 2, 2] });
 	if (r.error) throw r.error;
 	if (r.status !== 0) throw new Error(`OpenShell ${args[0]} ${args[1] || ""} failed`);
 	return r.stdout || "";
 }
+/** @param {string | undefined} name */
 function platformName(name) {
 	if (!namePattern.test(name || "")) throw new Error("invalid sandbox name");
 	const full = prefix + name;
 	if (full.length > 19) throw new Error(`OpenShell names are limited to 19 characters including prefix '${prefix}'; shorten the VM name or prefix`);
 	return full;
 }
+/** @returns {Array<{ name: string, phase?: string, labels?: Record<string, string> }>} */
 function inventory() {
-	const all = [], seen = new Set(); let token = "";
+	/** @type {Array<{ name: string, phase?: string, labels?: Record<string, string> }>} */
+	const all = [];
+	const seen = new Set(); let token = "";
 	do {
 		const page = JSON.parse(cli(["sandbox", "list", "--output", "json", "--selector", `${OPENSHELL_NAMESPACE_LABEL}=${owner}`, "--page-token", token], { capture: true }));
 		if (!Array.isArray(page.sandboxes) || typeof page.next_page_token !== "string") throw new Error("unexpected OpenShell inventory response");
@@ -48,7 +54,9 @@ function inventory() {
 	// Verify ownership locally as well: never trust a name prefix or server-side selector alone.
 	return all.filter((s) => s.labels?.[OPENSHELL_NAMESPACE_LABEL] === owner && typeof s.name === "string" && s.name.startsWith(prefix) && namePattern.test(s.name.slice(prefix.length)));
 }
+/** @param {string | undefined} name */
 function find(name) { const n = platformName(name); return inventory().find((s) => s.name === n); }
+/** @param {string | undefined} name */
 function proxy(name) {
 	return spawn("openshell", ["--workspace", workspace, "ssh-proxy", "--gateway-name", gateway, "--name", platformName(name)], { env, stdio: "inherit" });
 }
@@ -116,4 +124,4 @@ try {
 	}
 	default: throw new Error(`unknown OpenShell adapter operation: ${command}`);
 	}
-} catch (e) { console.error(`boxery-openshell: ${e.message}`); process.exitCode = 2; }
+} catch (e) { console.error(`boxery-openshell: ${/** @type {Error} */ (e).message}`); process.exitCode = 2; }

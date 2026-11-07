@@ -32,7 +32,7 @@ export async function hostVersion() {
 }
 
 /** Is release A older than B? (MAJOR.MINOR.PATCH; anything after is ignored) @param {string} a @param {string} b */
-export function versionLt(a, b) {
+function versionLt(a, b) {
 	const parts = (/** @type {string} */ v) => v.replace(/^v/, "").replace(/[^0-9.].*$/, "").split(".").slice(0, 3).map((x) => Number(x) || 0);
 	const [x, y] = [parts(a), parts(b)];
 	for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) < (y[i] ?? 0);

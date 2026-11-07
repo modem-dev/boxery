@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // boxery MCP server: exposes boxery VMs as MCP tools (vm_bash, vm_read, …, vm_browser, vm_manage).
-// No dependencies; Node >= 20. Uses ~/.boxery (run `boxery setup user@host` first).
+// No dependencies; Node >= 22.13. Uses ~/.boxery (run `boxery setup user@host` first).
 //
 //   boxery-mcp (or: npx boxery-vm) [--host NAME] [--vm NAME]   stdio (launched by the MCP client)
 //   boxery-mcp --http 127.0.0.1:8765 [--host NAME] [--vm NAME]   Streamable HTTP at /mcp

@@ -3,10 +3,11 @@
 // Used by the CLI (controller/), the MCP server and the pi extension alike.
 // (Imports boxery-core, which imports this module through leases/grants: fine while nothing here runs at load.)
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os, { homedir } from "node:os";
 import path from "node:path";
 import { BOXERY_HOME, currentHost } from "./boxery-core.mjs";
+import { writeAtomic } from "./fsutil.mjs";
 import { DEFAULT_HOST_BIN, checkTarget, localHostBin, parseConfig, remoteCommand, renderSshConfig } from "./ssh-config.mjs";
 /** @import { HostProfile } from "./boxery-core.mjs" */
 /** @import { Target } from "./ssh-config.mjs" */
@@ -77,7 +78,7 @@ export async function stopHostCommands(sig) {
 }
 
 /** The process that runs boxery-host ARGS on the profile's host: [command, argv] (spawn it with config.env).
- *  Checks the target first, as the CLI's h does. @param {HostProfile} host @param {ProfileConfig} c @param {string[]} args
+ *  Checks the target first. @param {HostProfile} host @param {ProfileConfig} c @param {string[]} args
  *  @returns {[string, string[]]} */
 export function hostCommand(host, c, args) {
 	needHost(host, c);
@@ -149,7 +150,7 @@ export async function hostRun(args, { input, signal, host = currentHost(), timeo
 }
 
 /** Does the host support something its `help` shows (PATTERN)? Remembered in the profile as MARKER once it
- *  does, like the CLI's host_pins_keys (which reads `help` whatever its exit status). A host that doesn't
+ *  does (`help` is read whatever its exit status, as the Bash controller did). A host that doesn't
  *  is remembered for 10 minutes in this process only: it may be upgraded. recheck: ask again, and forget
  *  the marker if it no longer does (a host downgraded, or HOST pointed at an older one). A host that
  *  doesn't answer `help` at all changes nothing (recheck: what the marker says).
@@ -183,8 +184,7 @@ export async function hostLeaseJson({ host = currentHost(), signal, recheck } = 
 	return hostSupports(host, await profileConfig(host, { signal }), "host-lease-json", /^ {2}renew LEASE \[--ttl S\] \[--json\]/m, { signal, recheck });
 }
 
-/** The leases and ssh-agent grants ssh_config names. Stricter than the CLI's
- *  write_ssh_config: a lease record without one valid name and id, or a grant file that isn't a VM name,
+/** The leases and ssh-agent grants ssh_config names. Stricter than the Bash controller's write_ssh_config was: a lease record without one valid name and id, or a grant file that isn't a VM name,
  *  is skipped rather than written into ssh_config (neither is ever made by boxery). Leases in file (id)
  *  order, grants in VM order, both in C order (the CLI's globs follow the locale). @param {string} dir */
 function sshConfigEntries(dir) {
@@ -201,8 +201,8 @@ function sshConfigEntries(dir) {
 	return { leases, agentVms };
 }
 
-/** Rewrite the profile's ssh_config from its config, leases and grants, like the CLI's write_ssh_config
- *  (which doesn't check the target either: hostRun does, before running anything). Published whole
+/** Rewrite the profile's ssh_config from its config, leases and grants. (It doesn't check the target:
+ *  hostRun does, before running anything.) Published whole
  *  (rename): other boxery processes and ssh -F read it meanwhile. config: the profile's, already loaded.
  *  @param {{ host?: HostProfile, config?: ProfileConfig }} [opts] */
 export async function writeSshConfig({ host = currentHost(), config } = {}) {
@@ -210,11 +210,7 @@ export async function writeSshConfig({ host = currentHost(), config } = {}) {
 	const pins = await hostPinsKeys(host, c);
 	const text = renderSshConfig({ ...c, dir: host.dir, home: c.env.HOME ?? homedir(), pins, ...sshConfigEntries(host.dir) });
 	mkdirSync(host.dir, { recursive: true });
-	const tmp = `${host.sshConf}.tmp.${process.pid}`;
-	try {
-		writeFileSync(tmp, text);
-		renameSync(tmp, host.sshConf);
-	} finally { rmSync(tmp, { force: true }); }
+	writeAtomic(host.sshConf, text);
 }
 
 /** Close VM's shared (ControlMaster) connection: after a reset it points at a dead session. Never fails.

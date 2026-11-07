@@ -93,7 +93,7 @@ Setup builds/selects the image, saves an offline starter policy, chooses a names
 No Linux box? Run the host on your Mac and point the controller at `local`. The laptop and the host are then the same machine.
 
 ```bash
-brew install lima jq node
+brew install lima jq node   # jq: the Lima backend reads limactl's JSON with it
 npm install -g boxery-vm
 boxery-host init --backend lima
 boxery-host build-base

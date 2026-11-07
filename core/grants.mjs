@@ -9,7 +9,7 @@ export { listGrants, addGrants, revokeGrants, applyGrants, grantsChanged, stored
  * @param {GrantRequestArgs} [a] @param {{localCwd?: string}} [opts]
  */
 export function parseGrantRequest(a, opts) { return parseGrantSpec(a, opts); }
-/** @import { Grant, GrantSpec, GrantRequestArgs, HostProfile } from "./boxery-core.mjs" */
+/** @import { GrantSpec, GrantRequestArgs } from "./boxery-core.mjs" */
 const quoteWord = (/** @type {string} */ s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : q(s));
 /** Is real path `p` inside `dir`? `dir` is resolved too (macOS: /var → /private/var). */
 const underDir = (/** @type {string} */ p, /** @type {string} */ dir) => {

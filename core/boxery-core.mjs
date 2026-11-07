@@ -2,13 +2,12 @@
 // Plain ESM, Node >= 18, no dependencies. Talks to VMs over ssh using the selected host profile's
 // ssh_config (written by `boxery setup`), and to the VM host through the `boxery` controller CLI
 // (leases and grants: through the shared operations in leases.mjs and grants.mjs).
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import * as linux from "../guests/linux.mjs";
 import { q } from "./shell.mjs";
 import { streamCopy } from "./copy-stream.mjs";
@@ -68,7 +67,7 @@ const hostContext = /** @type {AsyncLocalStorage<HostProfile>} */ (new AsyncLoca
 const resolvedHosts = new WeakSet();
 /** @type {HostProfile | undefined} */
 let implicitHost; // Existing callers (pi) keep a stable default for this process.
-export const VALID_HOST = /^[a-z][a-z0-9-]{0,30}$/;
+const VALID_HOST = /^[a-z][a-z0-9-]{0,30}$/;
 /** @param {unknown} name */
 export function assertHost(name) {
 	if (typeof name !== "string" || name !== name.trim() || !VALID_HOST.test(name)) throw new Error(`invalid host name "${name ?? ""}"`);
@@ -150,7 +149,7 @@ function readProfileFile(file, max = 64 * 1024) {
 	} catch { return null; } finally { if (fd !== undefined) closeSync(fd); }
 }
 /** Where a profile's VM host runs: "local" (the machine running the controller), an ssh destination, or null (unset/unparsed). @param {HostRef} [host] */
-export function hostDestination(host) {
+function hostDestination(host) {
 	const h = resolveHost(host);
 	const text = readProfileFile(path.join(h.dir, "config")) ?? "";
 	const values = text.split("\n").map((l) => /^[ \t]*(?:export[ \t]+)?HOST=(.*)$/.exec(l)).filter(Boolean);
@@ -161,7 +160,7 @@ export function hostDestination(host) {
 export function hostBackend(host) {
 	const text = readProfileFile(path.join(resolveHost(host).dir, "backend"), 64);
 	const name = text?.replace(/\n$/, "");
-	return name && VALID_HOST.test(name) ? name : null; // one line, like the controller's valid_vm
+	return name && VALID_HOST.test(name) ? name : null; // one line, a name
 }
 /** Backends whose VMs run on the host machine itself; the others (exe, boat) run in the cloud. */
 const ON_HOST_BACKENDS = ["lima", "libvirt", "cloud-hypervisor"];
@@ -226,10 +225,10 @@ export async function removeHost(name) {
 }
 export const REMOTE_HOME = linux.home;
 export const PROJECT = linux.project;
-export const CDP_PORT = 9222;
+const CDP_PORT = 9222;
 export const VALID_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 export const MAX_BYTES = 50 * 1024;
-export const MAX_CAPTURE = 64 * 1024 * 1024; // hard cap on bytes buffered from one remote command
+const MAX_CAPTURE = 64 * 1024 * 1024; // hard cap on bytes buffered from one remote command
 export const MAX_LINES = 2000;
 
 export const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
@@ -484,7 +483,7 @@ const JOBS_SOURCE = readFileSync(new URL("./boxery-jobs.ts", import.meta.url));
 // The runner it starts each job with (plain bash), sent along with every start.
 const JOBS_RUNNER = readFileSync(new URL("./boxery-job-runner.sh", import.meta.url)).toString("base64");
 // Probe for type stripping rather than matching versions (it arrived in 22.18 and 23.6, not 23.0).
-const JOBS_NODE = `T="--experimental-strip-types --disable-warning=ExperimentalWarning --input-type=module-typescript"
+export const JOBS_NODE = `T="--experimental-strip-types --disable-warning=ExperimentalWarning --input-type=module-typescript"
 node $T -e "" >/dev/null 2>&1 || { echo "boxery jobs: need Node >= 22.18 in the VM (found: $(node -v 2>/dev/null || echo none))" >&2; exit 1; }
 BOXERY_CALLER=$PPID exec node $T -`;
 export const VALID_JOB = /^job-[a-z0-9-]{1,36}$/;
@@ -699,7 +698,7 @@ export async function editTool(vm, { path: p, edits, oldText, newText }, { signa
 
 // A server that runs on the control plane (HTTP MCP) must not hand an agent that machine's files:
 // boxery's state there holds every VM's proxy token, the LLM keys and the management ssh key.
-export const LOCAL_COPY_DISABLED =
+const LOCAL_COPY_DISABLED =
 	"vm_copy local: endpoints are disabled on this server: it runs on the boxery control plane, and local: would be that machine's files (where boxery keeps its credentials), not yours. " +
 	"Copy between VMs (NAME:/path), or ask the user to start the server with --copy-root DIR to allow local: paths inside DIR.";
 
@@ -1150,7 +1149,7 @@ export async function grantRequest(vm, a, { approve, localCwd, signal } = {}) {
 }
 
 /** @param {string} name */
-export async function vmExists(name) {
+async function vmExists(name) {
 	return (await listVms()).some((v) => v.name === name);
 }
 

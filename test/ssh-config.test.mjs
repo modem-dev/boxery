@@ -1,4 +1,4 @@
-// core/ssh-config.mjs against the Bash controller: the ssh_config each renders for the same profile, and
+// core/ssh-config.mjs against the former Bash controller (frozen as test/fixtures/bash-profile.sh): the ssh_config each renders for the same profile, and
 // the quoting helpers word for word. Golden files (test/fixtures/ssh-config) were rendered by
 // the Bash controller's write_ssh_config (test/fixtures/bash-profile.sh); a live check renders them again.
 import assert from "node:assert/strict";
@@ -25,7 +25,7 @@ function load(name) {
 	};
 }
 
-test("renders the same ssh_config as the Bash controller (golden files)", () => {
+test("renders the same ssh_config as the former Bash controller (golden files)", () => {
 	assert.ok(cases.length >= 8, "golden cases present");
 	for (const c of cases) assert.equal(S.renderSshConfig(load(c)), readFileSync(path.join(FIX, `${c}.ssh_config`), "utf8"), c);
 });
@@ -44,13 +44,13 @@ test("the golden files are still what this checkout's Bash renders, and Node wri
 // Strings that exercise every escape: quotes, $, `, \, %, spaces, ~, globs, unicode.
 const NASTY = ["", "plain", "a b", "it's", 'say "hi"', "$HOME", "`id`", "back\\slash", "100%", "%h%%", "~", "~/x", "~user", "*?[a]", "ünï", "'\"$`\\%"];
 
-/** Run one profile.sh helper on each input in one bash, NUL-separated. @param {string} fn @param {string[]} inputs */
+/** Run one bash-profile.sh helper on each input in one bash, NUL-separated. @param {string} fn @param {string[]} inputs */
 function bash(fn, inputs) {
 	const out = execFileSync("bash", ["-c", `. "$1"; f=$2; shift 2; for a; do "$f" "$a"; printf '\\0'; done`, "x", profileSh, fn, ...inputs], { encoding: "utf8", env: { ...process.env, BOXERY_HOME: "/nonexistent" } });
 	return out.split("\0").slice(0, -1);
 }
 
-test("quoting helpers match profile.sh word for word", () => {
+test("quoting helpers match bash-profile.sh word for word", () => {
 	for (const [fn, js] of /** @type {[string, (s: string) => string][]} */ ([
 		["literal", S.literal], ["remote_path", S.remotePath], ["shell_double", S.shellDouble], ["ssh_value", S.sshValue],
 		["ssh_word", S.sshWord], ["ssh_include_value", S.sshIncludeValue], ["known_hosts_command", S.knownHostsCommand],

@@ -1,7 +1,7 @@
 // boxery setup | host add|ls|show|use|rm | backend: the CLI's side of the host registry. The work is
 // core/registry.mjs (shared with vm_manage host_add/host_rm); here: arguments, the terminal (the host's init
 // and checks pass through and may ask), and the listing formats.
-import { describeHosts, hostBackend, profileFromDirectory, registeredHosts, resolveHost } from "../core/boxery-core.mjs";
+import { describeHosts, profileFromDirectory, registeredHosts, resolveHost } from "../core/boxery-core.mjs";
 import { profileConfig } from "../core/profile.mjs";
 import { RegistryError, VALID_ALIAS, addHostLocked, checkedDefault, destination, isRegistered, needAlias, recordBackend, removeHostLocked, setDefault, setup, withRegistryLock } from "../core/registry.mjs";
 import { CliError, die, note, say } from "./lib.mjs";
@@ -124,7 +124,8 @@ async function hostLs(args) {
 	if (args.length > (json ? 1 : 0)) die("usage: boxery host ls [--json]");
 	const def = checkedDefault();
 	registeredHosts(); // every registration checked first, as before any is listed
-	const rows = await Promise.all(describeHosts().map(async (h) => ({ ...h, default: h.name === def, destination: await destination(profileFromDirectory(h.name, h.dir)), backend: hostBackend(profileFromDirectory(h.name, h.dir)) })));
+	// (destination: the CLI sources a computed config, as it runs it; vm_info hosts parses plain assignments only: docs/hosts.md)
+	const rows = await Promise.all(describeHosts().map(async (h) => ({ ...h, default: h.name === def, destination: await destination(profileFromDirectory(h.name, h.dir)) })));
 	if (json) return say(rows.length ? `[\n${rows.map((r) => JSON.stringify({ name: r.name, dir: r.dir, default: r.default, destination: r.destination, backend: r.backend, same_as: r.same_as })).join(",\n")}\n]` : "[]");
 	say(["NAME\tDEFAULT\tCONFIG_DIR\tDESTINATION\tBACKEND\tSAME_AS", ...rows.map((r) =>
 		[r.name, r.default ? "*" : "", r.dir, r.destination ?? "-", r.backend ?? "-", r.same_as.join(",") || "-"].join("\t"))].join("\n"));

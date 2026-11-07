@@ -1,13 +1,14 @@
 // Grant operations shared by the CLI, MCP and pi. No confirmation decisions here.
 import { execFile, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync, renameSync, unlinkSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync, unlinkSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { currentHost, hostBackend, assertName, deniedDirs, isWithin, REMOTE_HOME } from "./boxery-core.mjs";
 import { parseGrantSpec } from "./grants.mjs";
 import { q } from "./shell.mjs";
+import { writeAtomic } from "./fsutil.mjs";
 import { closeMaster, hostRun, writeSshConfig } from "./profile.mjs";
-/** @import { Grant, GrantSpec, HostProfile } from "./boxery-core.mjs" */
+/** @import { Grant, GrantSpec } from "./boxery-core.mjs" */
 /** CLI env-command helpers may use the original stdin and show prompts on stderr. Agent calls remain headless.
  * @typedef {{ signal?: AbortSignal, interactiveCommands?: boolean, commandStdin?: number }} GrantOptions
  */
@@ -51,9 +52,7 @@ async function editStore(vm, change) {
 		const rows = change(read(file).split("\n").filter(Boolean).map((l) => l.split("\t")));
 		if (!rows.length) remove(file);
 		else {
-			const tmp = `${file}.tmp.${process.pid}`;
-			writeFileSync(tmp, rows.map((r) => r.join("\t")).join("\n") + "\n", { mode: 0o600 });
-			renameSync(tmp, file);
+			writeAtomic(file, rows.map((r) => r.join("\t")).join("\n") + "\n", { mode: 0o600 });
 		}
 	} finally { closeSync(fd); remove(lock); }
 }
@@ -212,6 +211,22 @@ export async function grantsChanged(vm, opts = {}) {
 	} catch (e) {
 		return `boxery: grants for ${vm} are saved, but the change is not fully applied (${stage}: ${/** @type {Error} */ (e).message}). Fix the error and retry the grant/revoke command.`;
 	}
+}
+/** Grant kinds pushed into the VM's tmpfs (gone after a restart or reset); ssh-agent is forwarded, not pushed. */
+export const PUSHED_KINDS = new Set(["env", "file", "http", "llm"]);
+/**
+ * After a restart, revert or new lease: push VM's pushed grants again, if it has any (always: reconcile even
+ * with none, as after a revert). Never fails the caller: problems are logged. log gets the warnings (boxery:
+ * lines); say, if given, the whole report.
+ * @param {string} vm @param {{ always?: boolean, interactiveCommands?: boolean, log?: (line: string) => void, say?: (text: string) => void }} [opts]
+ */
+export async function reapplyPushed(vm, { always = false, interactiveCommands = false, log = () => {}, say } = {}) {
+	try {
+		if (!always && !listGrants(vm).some((g) => PUSHED_KINDS.has(g.kind))) return;
+		const out = await applyGrants(vm, { interactiveCommands });
+		if (say) say(out);
+		else for (const line of out.split("\n")) if (line.startsWith("boxery:")) log(line);
+	} catch (e) { log(`boxery: could not apply grants to ${vm}: ${/** @type {Error} */ (e).message}`); }
 }
 /** Used by fork: resolve and validate every source grant before confirmation and creation.
  * @param {string} vm @returns {GrantSpec[]}

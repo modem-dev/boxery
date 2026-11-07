@@ -8,7 +8,7 @@ The host runs in Node. Bash remains where it fits: the entry point (`host/boxery
 
 | Module | Owns | Does not own |
 |---|---|---|
-| `controller/boxery`, `controller/*.mjs` | The laptop CLI: a Bash shim that starts `controller/cli.mjs`; argument parsing, output, grant approval, terminal commands and the host registry. VM lifecycle, leases, grants and profiles are the shared core (`core/lifecycle.mjs`, `core/leases.mjs`, `core/grants.mjs`, `core/profile.mjs`) | Host lease decisions or hypervisor mechanics |
+| `controller/boxery`, `controller/*.mjs` | The laptop CLI: a Bash shim that starts `controller/cli.mjs`; argument parsing, output, grant approval, terminal commands and the host registry (`cli.mjs` dispatch; `lib.mjs` argv, output and host calls; `usage.mjs`; `hosts.mjs`, `grants.mjs`, `leases.mjs`, `cp.mjs`, `jobs.mjs`, `runners-once.mjs`, `setup-openshell.mjs` per command group). VM lifecycle, leases, grants and profiles are the shared core (`core/lifecycle.mjs`, `core/leases.mjs`, `core/grants.mjs`, `core/profile.mjs`) | Host lease decisions or hypervisor mechanics |
 | `host/boxery-host` | Entry point (Bash): `connect` via `backend.sh`, everything else to Node (the node `init` recorded) | Any command logic |
 | `host/boxery-host.mjs` + `host/cli.mjs` | Node version check; CLI: argument dispatch, listings and their output formats, supervised mutating commands, private worker entry points | Lease policy, hypervisor commands |
 | `host/setup.mjs` | `init` (state directory, `host.env`, proxy/reaper/runner-manager services), `build-base`, `add-key` | VM lifecycle |
@@ -71,7 +71,7 @@ This lets tests assert ordering directly. In particular, reset cannot publish FR
 
 ## Compatibility and tests
 
-Documented CLI arguments, listing output (tables and JSON), environment overrides, pool state semantics, the intent journal format and backend contracts are unchanged by the move to Node. Lease command stdout stays machine-readable (`NAME LEASE_ID EXPIRES_AT` for acquire; `NAME EXPIRES_AT` for renew); diagnostics stay on stderr. The controller still needs only Bash 3.2 and SSH.
+Documented CLI arguments, listing output (tables and JSON), environment overrides, pool state semantics, the intent journal format and backend contracts are unchanged by the move to Node. Lease command stdout stays machine-readable (`NAME LEASE_ID EXPIRES_AT` for acquire; `NAME EXPIRES_AT` for renew); diagnostics stay on stderr. The controller needs Node ≥ 22.13 and ssh (and bash, for its entry shim and for a computed profile config).
 
 - `test/shell/host-output.sh`: exact output of listings, usage and common errors.
 - `test/lease-workflows.test.mjs`: injected policy tests, no SQLite or subprocesses, so they also run on a Node without `node:sqlite`.
@@ -81,6 +81,6 @@ Documented CLI arguments, listing output (tables and JSON), environment override
 - `test/shell/host-init.sh`: `init`, `add-key` and `build-base` with stubbed service managers.
 - `test/runners.test.mjs`: the GitHub runner manager's policy with injected pool/guest/GitHub fakes, the REST client against a local stub server, and a full `boxery-host runners run` against the fake backend; `test/shell/host-runners.sh`: the `runners` CLI, the controller passthrough, and the guest layer's `boxery-runner`; `test/shell/controller-runners-once.sh`: `boxery runners once` end to end with a stub `gh` (the JIT config only ever on stdin, cleanup after a job, Ctrl-C, a refused registration and a killed controller).
 - `test/bench/host-timings.sh`: not a test; mean timings of common commands, to compare before and after a change.
-- `test/shell/*.sh`: controller, backend and CLI integration contracts, including Bash 3.2.
+- `test/shell/*.sh`: controller, backend and CLI integration contracts; also run under Bash 3.2 for the parts still in Bash (entry shims, `connect`, backends, sourced profile configs).
 
 See [Lifecycle coordination and recovery](lifecycle.md) for the locking, recovery and upgrade contract.

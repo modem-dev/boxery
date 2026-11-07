@@ -235,7 +235,7 @@ Conventions:
 - Arrays are printed one element per line. That is still ordinary JSON; parse it as a whole.
 - Empty lists print `[]`.
 
-The controller (`boxery`) needs no `jq`; it builds JSON with `printf`. The host (`boxery-host`) builds it in Node.
+Both `boxery` and `boxery-host` build JSON in Node; neither needs `jq`.
 
 ### Controller (`boxery`, on your laptop)
 

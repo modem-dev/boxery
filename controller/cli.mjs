@@ -3,12 +3,10 @@
 // (core/leases.mjs), grants (core/grants.mjs), copies (vm_copy) and the host profile (core/profile.mjs).
 // What is only the CLI's lives here: argument parsing, the terminal (grant approval, ssh, attach, desktop),
 // and output formats (docs/cli.md), which are the same as the Bash controller's were.
-import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BOXERY_HOME, defaultHost, profileFromDirectory, resolveHost, withHost } from "../core/boxery-core.mjs";
+import { BOXERY_HOME, defaultHost, resolveHost, withHost } from "../core/boxery-core.mjs";
 import * as lifecycle from "../core/lifecycle.mjs";
 import { refreshSshConfig } from "../core/profile.mjs";
 import { literal, literalArgs, remotePath } from "../core/ssh-config.mjs";
@@ -293,10 +291,19 @@ export const COMMANDS = {
 	},
 	// A revert restores the snapshot's tmpfs too: grants are always reconciled to the current ones.
 	revert: async (s, [n, snap]) => { needHost(s); if (!VALID_SNAP.test(snap ?? "")) die(`invalid snapshot name: ${snap ?? ""}`); await lc(() => lifecycle.revertVm(needVm(n), snap, passthrough())); },
-	snap: async (s, args) => { needHost(s); if (args[1] && !VALID_SNAP.test(args[1])) die(`invalid snapshot name: ${args[1]}`); await hostPass(s, ["snap", ...args]); },
+	snap: async (s, args) => {
+		needHost(s); const n = needVm(args[0]);
+		if (args[1] && !VALID_SNAP.test(args[1])) die(`invalid snapshot name: ${args[1]}`);
+		if (args.length > 2) die("usage: boxery snap NAME [SNAP]");
+		await lc(() => lifecycle.snapVm(n, args[1] || null, passthrough()));
+	},
 	new: async (s, args) => { needHost(s); await cmdNew(s, args); },
 	fork: async (s, args) => { needHost(s); await cmdFork(s, args); },
-	"snap-rm": async (s, args) => { needHost(s); if (!args[1] || !VALID_SNAP.test(args[1])) die("usage: boxery snap-rm NAME SNAP"); await hostPass(s, ["snap-rm", ...args]); },
+	"snap-rm": async (s, args) => {
+		needHost(s);
+		if (args.length !== 2 || !VALID_SNAP.test(args[1])) die("usage: boxery snap-rm NAME SNAP");
+		await lc(() => lifecycle.snapRm(needVm(args[0]), args[1], passthrough()));
+	},
 	images: async (s, args) => hostPass(s, ["images", ...args]),
 	// Re-pin a VM's ssh host key on the host (a VM made before keys were pinned, or whose record was lost).
 	pin: async (s, args) => {
@@ -359,7 +366,7 @@ async function main(argv) {
 		explicit = argv[1];
 		if (!explicit) die("invalid host name");
 		argv = argv.slice(2);
-		// Internal (MCP/pi): --profile-dir binds the directory they resolved, not a registry entry that could change.
+		// Internal (tests): --profile-dir uses that directory as the host's profile, without the registry.
 		if (argv[0] === "--profile-dir") {
 			if (argv.length < 3) die("usage: boxery --host NAME --profile-dir DIR COMMAND");
 			pinned = argv[1]; argv = argv.slice(2);

@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { constants } from "node:os";
 import { acquireLease, leaseRows, localLeases, releaseLease, renewLease } from "../core/leases.mjs";
-import { CliError, die, note, quit, say } from "./lib.mjs";
+import { die, hostFailed, note, quit, say } from "./lib.mjs";
 /** @import { Selected } from "./lib.mjs" */
 
 /** Like `date`: the local format people read elsewhere in the CLI. @param {number} t unix seconds */
@@ -26,15 +26,6 @@ function parse(a, flags) {
 	return out;
 }
 
-/** A lease operation's failure, as the CLI reports it. @param {unknown} e @returns {never} */
-function failed(e) {
-	const err = /** @type {Error & { exitCode?: number, reported?: boolean }} */ (e);
-	if (err instanceof CliError) throw err;
-	// The host already explained a failed acquire on stderr; pass its exit status through.
-	if (err.reported) quit(err.exitCode ?? 1);
-	return die(err.message);
-}
-
 /** @param {Selected} _s @param {"acquire" | "renew" | "release" | "leases"} command @param {string[]} args */
 export async function leaseCommand(_s, command, args) {
 	const abort = new AbortController();
@@ -52,7 +43,7 @@ export async function leaseCommand(_s, command, args) {
 			for (const [sig, h] of handlers) process.once(sig, h);
 			let r;
 			try { r = await acquireLease({ ttl: o.ttl ?? 1800, wait: o.wait ?? 0, ...(o.holder !== undefined ? { holder: o.holder } : {}) }, cli); }
-			catch (e) { if (interrupted && /** @type {Error} */ (e).name === "AbortError") quit(interrupted); failed(e); }
+			catch (e) { if (interrupted && /** @type {Error} */ (e).name === "AbortError") quit(interrupted); hostFailed(e); }
 			finally { for (const [sig, h] of handlers) process.off(sig, h); }
 			note(`==> leased ${r.name} (lease ${r.id}, expires in ${r.expires - Math.floor(Date.now() / 1000)}s; renew with: boxery renew ${r.name})`);
 			return say(`${r.name} ${r.id}`);
@@ -63,14 +54,14 @@ export async function leaseCommand(_s, command, args) {
 			let r;
 			try { r = await renewLease(ref ?? "", ttl, cli); }
 			catch (e) {
-				if (!(/** @type {{ fromHost?: boolean }} */ (e).fromHost)) failed(e); // local problems: say what they are
+				if (!(/** @type {{ fromHost?: boolean }} */ (e).fromHost)) hostFailed(e); // local problems: say what they are
 				die("renew failed (lease expired or released?)");
 			}
 			return say(`==> renewed ${r.name} until ${localDate(r.expires)}`);
 		}
 		case "release": {
 			let r;
-			try { r = await releaseLease(args[0] ?? "", cli); } catch (e) { failed(e); }
+			try { r = await releaseLease(args[0] ?? "", cli); } catch (e) { hostFailed(e); }
 			return say(`==> released ${r.name}`);
 		}
 		case "leases": {

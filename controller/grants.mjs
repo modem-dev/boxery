@@ -7,11 +7,11 @@ import path from "node:path";
 import { formatGrants, hostBackend } from "../core/boxery-core.mjs";
 import { parseGrantArgs } from "../core/grant-approval.mjs";
 import { addGrants, applyGrants, grantCommand, grantPrompt, listGrants, revokeGrants, storedSpecs } from "../core/grants.mjs";
-import { CliError, VALID_VM, die, needHost, needVm, note, say, warn } from "./lib.mjs";
+import { reapplyPushed } from "../core/grant-operations.mjs";
+import { CliError, VALID_VM, die, needHost, needVm, note, say } from "./lib.mjs";
 /** @import { GrantSpec } from "../core/boxery-core.mjs" */
 /** @import { Selected } from "./lib.mjs" */
 
-const PUSHED = new Set(["env", "file", "http", "llm"]);
 /** Grant commands may ask on this terminal (an env --cmd helper's prompt). */
 const interactive = { interactiveCommands: true };
 
@@ -114,11 +114,6 @@ export async function agentForward(s, args) {
 /** Before a connection that needs them (ssh, attach, run --bg): push VM's pushed grants again (they live in
  *  tmpfs). Quiet but for warnings; never fails the command. @param {Selected} s @param {string} vm */
 export async function reapplyQuiet(s, vm) {
-	if (!VALID_VM.test(vm)) return;
-	try {
-		if (!listGrants(vm).some((g) => PUSHED.has(g.kind))) return;
-		refuseOpenShell(s);
-		const out = await applyGrants(vm, interactive);
-		for (const line of out.split("\n")) if (line.startsWith("boxery:")) note(line);
-	} catch (e) { warn(/** @type {Error} */ (e).message); }
+	if (!VALID_VM.test(vm) || hostBackend(s.host) === "openshell") return;
+	await reapplyPushed(vm, { interactiveCommands: true, log: note });
 }

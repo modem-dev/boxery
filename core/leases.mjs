@@ -5,11 +5,12 @@
 //   ID.key, ID.key.pub     the lease's own throwaway ssh key; the host installs the public half in the VM
 // ssh_config uses ID.key for NAME.boxery while the lease lasts (core/profile.mjs writeSshConfig).
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
 import { currentHost, VALID_NAME } from "./boxery-core.mjs";
-import { applyGrants, listGrants } from "./grant-operations.mjs";
+import { reapplyPushed } from "./grant-operations.mjs";
+import { writeAtomic } from "./fsutil.mjs";
 import { closeMaster, hostLeaseJson, hostRun, writeSshConfig } from "./profile.mjs";
 
 /** A lease this machine holds. expires: unix seconds. @typedef {{ name: string, id: string, expires: number, ttl: number | null, holder: string | null, file: string }} LeaseRecord */
@@ -20,7 +21,6 @@ import { closeMaster, hostLeaseJson, hostRun, writeSshConfig } from "./profile.m
  *  @typedef {{ log?: (line: string) => void, interactiveCommands?: boolean, timeout?: number, signal?: AbortSignal, stderr?: "pipe" | "inherit" }} LeaseOpts */
 
 export const VALID_LEASE = /^l-[0-9a-f]{32}$/;
-const PUSHED = new Set(["env", "file", "http", "llm"]);
 
 const leasesDir = () => path.join(currentHost().dir, "leases");
 const recordFile = (/** @type {string} */ id) => path.join(leasesDir(), `${id}.lease`);
@@ -47,9 +47,7 @@ function readRecord(file) {
 
 /** @param {LeaseRecord} r */
 function writeRecord(r) {
-	const tmp = `${r.file}.tmp.${process.pid}`;
-	writeFileSync(tmp, `name=${r.name}\nid=${r.id}\nexpires=${r.expires}\nttl=${r.ttl ?? ""}\nholder=${r.holder ?? ""}\n`, { mode: 0o600 });
-	renameSync(tmp, r.file);
+	writeAtomic(r.file, `name=${r.name}\nid=${r.id}\nexpires=${r.expires}\nttl=${r.ttl ?? ""}\nholder=${r.holder ?? ""}\n`, { mode: 0o600 });
 }
 
 /** Leases this machine holds on the current host, by lease id. @returns {LeaseRecord[]} */
@@ -73,15 +71,7 @@ function needLease(ref) {
 }
 
 /** Pushed (tmpfs) grants are gone after a reset: push them again. Never fails the lease operation. @param {string} vm @param {LeaseOpts} opts */
-async function reapplyGrants(vm, opts) {
-	try {
-		if (!listGrants(vm).some((g) => PUSHED.has(g.kind))) return;
-		const out = await applyGrants(vm, { interactiveCommands: !!opts.interactiveCommands });
-		for (const line of out.split("\n")) if (line.startsWith("boxery:")) opts.log?.(line);
-	} catch (e) {
-		opts.log?.(`boxery: could not apply grants to ${vm}: ${/** @type {Error} */ (e).message}`);
-	}
-}
+const reapplyGrants = (vm, opts) => reapplyPushed(vm, { interactiveCommands: !!opts.interactiveCommands, log: (l) => opts.log?.(l) });
 
 /** @param {string} file @param {string} comment */
 function keygen(file, comment) {
@@ -129,7 +119,7 @@ async function leaseCall(args, runOpts) {
 	}
 }
 
-export const defaultHolder = () => `${process.env.USER || "user"}@${hostname().split(".")[0]}`;
+const defaultHolder = () => `${process.env.USER || "user"}@${hostname().split(".")[0]}`;
 
 /**
  * Lease a free pool VM: a fresh ssh key, the host's `acquire`, then the local record and ssh_config.
