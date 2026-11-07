@@ -27,8 +27,11 @@ rel="bin/it's \$(touch NOT_EXECUTED) \`echo no\` % host"
 mkdir -p "$REMOTE_HOME/bin"
 printf '#!/usr/bin/env bash\ncase $1 in help) : ;; add-key) cat >/dev/null ;; ls) echo "demo running" ;; connect) printf "CONNECTED:%%s:%%s\\n" "$2" "$3" ;; esac\n' >"$REMOTE_HOME/$rel"
 chmod +x "$REMOTE_HOME/$rel"
+# Before any host is registered nothing is routed anywhere.
+if "$CLI" ls >/dev/null 2>&1; then echo 'routed without a host' >&2; exit 1; fi
+"$CLI" ls 2>&1 | grep -q 'no host configured'
 "$CLI" host add alpha user@fake --host-bin "~/$rel" >/dev/null
-[ ! -f "$BOXERY_HOME/default-host" ]
+[ "$(cat "$BOXERY_HOME/default-host")" = alpha ] # the first host becomes the default
 [ "$("$CLI" host show alpha)" = "$BOXERY_HOME/profiles/alpha" ]
 # Sourcing saved config on the controller must NOT expand the remote tilde.
 # shellcheck disable=SC1090
@@ -53,8 +56,6 @@ lines=$(wc -l <"$SSH_LOG")
 "$CLI" host add beta --config-dir "$import" >/dev/null
 [ "$(wc -l <"$SSH_LOG")" -eq "$lines" ]
 cmp "$import/config" "$tmp/config.before"; cmp "$import/ssh_config" "$tmp/ssh.before"
-# No ambient legacy destination/executable leaks into a registered profile.
-export BOXERY_HOST=unwanted BOXERY_HOST_BIN=/no/such/bin
 "$CLI" --host beta ls | grep -q '^ls '
 "$CLI" host use alpha
 cp "$BOXERY_HOME/default-host" "$tmp/default.before"
@@ -68,21 +69,23 @@ if "$CLI" host rm alpha >/dev/null 2>&1; then echo 'removed selected default' >&
 [ -f "$BOXERY_HOME/profiles/alpha/config" ]
 if "$CLI" host add alpha user@fake >/dev/null 2>&1; then echo 'overwrote forgotten profile data' >&2; exit 1; fi
 [ -f "$import/grants/demo" ]
-"$CLI" host use legacy
-[ ! -e "$BOXERY_HOME/default-host" ]
-# Legacy ambient overrides still work; root config does not need to exist.
-BOXERY_HOST=local BOXERY_HOST_BIN=/bin/echo "$CLI" ls | grep -q '^ls '
+# There is no built-in root profile to fall back to.
+if "$CLI" host use legacy >/dev/null 2>&1; then echo 'selected an unregistered legacy host' >&2; exit 1; fi
+[ "$(cat "$BOXERY_HOME/default-host")" = beta ]
 for name in '../escape' '-oProxyCommand=x' 'bad name' 'a/b' 'Upper' ''; do
  if "$CLI" --host "$name" ls >/dev/null 2>&1; then echo "accepted invalid host $name" >&2; exit 1; fi
 done
 if "$CLI" --host unknown ls >/dev/null 2>&1; then exit 1; fi
 if "$CLI" host add beta --config-dir "$import" >/dev/null 2>&1; then exit 1; fi
 if "$CLI" host add failed local --host-bin /no/such/bin >/dev/null 2>&1; then exit 1; fi
-[ ! -e "$BOXERY_HOME/host-registry/failed" ]; [ ! -e "$BOXERY_HOME/profiles/failed" ]; [ ! -e "$BOXERY_HOME/default-host" ]
+[ ! -e "$BOXERY_HOME/host-registry/failed" ]; [ ! -e "$BOXERY_HOME/profiles/failed" ]; [ "$(cat "$BOXERY_HOME/default-host")" = beta ]
+# setup names the host after its destination, or fails asking for --name.
+if "$CLI" setup 'you@-bad' >/dev/null 2>&1; then echo 'derived an invalid host name' >&2; exit 1; fi
+"$CLI" setup 'you@9bad' 2>&1 | grep -q 'pass --name NAME'
+if "$CLI" --host beta setup local >/dev/null 2>&1; then echo 'setup accepted --host' >&2; exit 1; fi
 # Two managed local profiles: separate grants, SSH configs and control sockets, even for demo.
 # Include quotes/spaces in the root path to exercise SSH config value quoting.
 export BOXERY_HOME="$tmp/root's space"
-unset BOXERY_HOST BOXERY_HOST_BIN
 localbin="$tmp/local it's \$(touch NOT_EXECUTED) \`echo no\` % host"
 cp "$REMOTE_HOME/$rel" "$localbin"
 "$CLI" host add quoted local --host-bin "$localbin" >/dev/null
@@ -93,6 +96,7 @@ sh -c "$proxy" | grep -q '^CONNECTED:demo.boxery:22$'
 [ ! -e NOT_EXECUTED ]
 "$CLI" host add one local --host-bin /bin/echo >/dev/null
 "$CLI" host add two local --host-bin /bin/echo >/dev/null
+echo 'GRANT_CONFIRM=off' >>"$BOXERY_HOME/profiles/one/config"
 "$CLI" --host one grant demo ssh-agent >/dev/null
 [ -f "$BOXERY_HOME/profiles/one/grants/demo" ]; [ ! -f "$BOXERY_HOME/profiles/two/grants/demo" ]
 one=$("$REAL_SSH" -F "$BOXERY_HOME/profiles/one/ssh_config" -G demo.boxery)
@@ -113,12 +117,13 @@ help|release) : ;;
 add-key) cat >/dev/null ;;
 acquire) cat >/dev/null; printf 'demo l-0123456789abcdef0123456789abcdef %s\n' "$(( $(date +%s) + 600 ))" ;;
 renew) printf '%s %s\n' "$2" "$(( $(date +%s) + 600 ))" ;;
-edge-set) cat >>"$EDGE_LOG" ;;
+edge-set) cat >>"$EDGE_LOG"; [ -z "${EDGE_ARGS:-}" ] || echo "$*" >>"$EDGE_ARGS" ;;
 esac
 STUB
 chmod +x "$leasebin"
 "$CLI" host add lease-one local --host-bin "$leasebin" >/dev/null
 "$CLI" host add lease-two local --host-bin "$leasebin" >/dev/null
+for profile in lease-one lease-two; do echo 'GRANT_CONFIRM=off' >>"$BOXERY_HOME/profiles/$profile/config"; done
 id=l-0123456789abcdef0123456789abcdef
 [ "$("$CLI" --host lease-one acquire --ttl 600 2>/dev/null)" = "demo $id" ]
 p1="$BOXERY_HOME/profiles/lease-one"; p2="$BOXERY_HOME/profiles/lease-two"
@@ -135,6 +140,12 @@ if cmp -s "$p1/leases/$id.key" "$p2/leases/$id.key"; then echo 'lease keys share
 [ -f "$p1/grants/.demo.edge" ]; [ ! -e "$p2/grants/.demo.edge" ]
 grep -q '"readonly":true' "$EDGE_LOG"
 "$CLI" --host lease-two grant demo http:api.example.com --cmd 'printf other-fixture-token' >/dev/null
+# llm grants on a leased VM: sent with the lease id, even without any http grant.
+: >"$EDGE_LOG"; export EDGE_ARGS="$tmp/edge.args"
+"$CLI" --host lease-one revoke demo http:api.example.com >/dev/null
+"$CLI" --host lease-one grant demo llm:ollama >/dev/null
+tail -1 "$EDGE_LOG" | grep -q '"llm":\["ollama"\]'
+grep -qx "edge-set demo --lease $id" "$EDGE_ARGS"
 "$CLI" --host lease-one release demo >/dev/null
 [ ! -e "$p1/leases/$id.key" ]; [ ! -e "$p1/grants/demo" ]; [ ! -e "$p1/grants/.demo.edge" ]
 [ -f "$p2/leases/$id.key" ]; [ -f "$p2/grants/demo" ]; [ -f "$p2/grants/.demo.edge" ]
@@ -150,11 +161,14 @@ for suffix in "root's include space" 'root "quoted" \slash [*?] include'; do
 	printf '%s\n' "$recommendation" >"$tmp/include-test-config"
 	resolved=$("$REAL_SSH" -F "$tmp/include-test-config" -G demo.boxery)
 	printf '%s\n' "$resolved" | grep -q '^user agent$'
-	direct=$("$REAL_SSH" -F "$BOXERY_HOME/ssh_config" -G demo.boxery)
+	direct=$("$REAL_SSH" -F "$BOXERY_HOME/profiles/local/ssh_config" -G demo.boxery)
 	[ "$resolved" = "$direct" ]
-	# Named profiles must not encourage ambiguous global *.boxery Includes.
+	# Further hosts must not encourage ambiguous global *.boxery Includes.
 	output=$("$CLI" host add named local --host-bin "$localbin")
-	if printf '%s\n' "$output" | grep -q '^    Include '; then echo 'named profile recommended a global Include' >&2; exit 1; fi
+	if printf '%s\n' "$output" | grep -q '^    Include '; then echo 'a non-default host recommended a global Include' >&2; exit 1; fi
+	# Re-running setup reconfigures the registered host in place.
+	"$CLI" setup local --host-bin "$localbin" >/dev/null
+	[ "$(cat "$BOXERY_HOME/host-registry/local")" = "$BOXERY_HOME/profiles/local" ]
 done
 # OpenSSH 9.6 and newer macOS clients differ on percent expansion in Include. Do not print
 # a misleading global Include for such paths; explicit -F still reads the exact config.
@@ -162,5 +176,69 @@ export BOXERY_HOME="$tmp/percent % profile"
 output=$("$CLI" setup local --host-bin "$localbin")
 if printf '%s\n' "$output" | grep -q '^    Include '; then echo 'nonportable percent Include recommended' >&2; exit 1; fi
 printf '%s\n' "$output" | grep -q 'instead of a global Include'
-"$REAL_SSH" -F "$BOXERY_HOME/ssh_config" -G demo.boxery | grep -q '^user agent$'
-echo 'PASS: named registry, default/reset, import, safe removal, isolation, failures and remote quoting'
+"$REAL_SSH" -F "$BOXERY_HOME/profiles/local/ssh_config" -G demo.boxery | grep -q '^user agent$'
+# host ls says where each host runs: destination, the backend setup recorded, and which names share a profile.
+export BOXERY_HOME="$tmp/listing"
+backendbin="$tmp/backend-host"
+printf '#!/usr/bin/env bash\ncase $1 in add-key) cat >/dev/null ;; backend) echo lima ;; esac\n' >"$backendbin"
+chmod +x "$backendbin"
+out=$("$CLI" setup local --host-bin "$backendbin") # not piped: grep -q closing early would kill setup mid-registration
+printf '%s\n' "$out" | grep -q '^==> backend: lima$'
+[ "$(cat "$BOXERY_HOME/profiles/local/backend")" = lima ]
+"$CLI" host add mirror --config-dir "$BOXERY_HOME/profiles/local" >/dev/null # records the canonical path (/private/var on macOS)
+real=$(cd "$BOXERY_HOME/profiles/local" && pwd -P)
+"$CLI" host add far user@fake --host-bin "~/$rel" >/dev/null # predates `backend`: nothing recorded
+[ ! -e "$BOXERY_HOME/profiles/far/backend" ]
+"$CLI" host use mirror
+"$CLI" host ls | grep -q "^local		$BOXERY_HOME/profiles/local	local	lima	mirror$"
+"$CLI" host ls | grep -q "^mirror	\*	$real	local	lima	local$"
+"$CLI" host ls | grep -q "^far		$BOXERY_HOME/profiles/far	user@fake	-	-$"
+"$CLI" host ls --json | jq -e --arg d "$BOXERY_HOME" --arg r "$real" '. == [
+	{name:"far",dir:($d + "/profiles/far"),default:false,destination:"user@fake",backend:null,same_as:[]},
+	{name:"local",dir:($d + "/profiles/local"),default:false,destination:"local",backend:"lima",same_as:["mirror"]},
+	{name:"mirror",dir:$r,default:true,destination:"local",backend:"lima",same_as:["local"]}]' >/dev/null
+# `backend` refreshes the record, and clears it rather than keep a stale one when the host can't say.
+[ "$("$CLI" --host local backend)" = lima ]
+printf 'stale\n' >"$BOXERY_HOME/profiles/far/backend"
+if "$CLI" --host far backend >/dev/null 2>&1; then echo 'backend invented a value' >&2; exit 1; fi
+[ ! -e "$BOXERY_HOME/profiles/far/backend" ]
+# host add --backend: creates the host-side profile, then every call (and the ProxyCommand) names it.
+export BOXERY_HOME="$tmp/profiles-root" PROFILE_LOG="$tmp/profile.log"
+mkdir -p "$REMOTE_HOME/bin"
+cat >"$REMOTE_HOME/bin/profiled" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$PROFILE_LOG"
+p=""; if [ "$1" = --profile ]; then p=$2; shift 2; fi
+if [ -n "$p" ] && [ ! -f "$HOME/made-$p" ] && [ "$1" != init ]; then echo "no profile '$p'" >&2; exit 1; fi
+case $1 in
+init) [ "${3:-}" != broken ] || { echo "backend check failed" >&2; exit 1; }; : >"$HOME/made-$p" ;;
+add-key) cat >/dev/null ;;
+ls) echo "demo running ${p:-default}" ;;
+connect) printf 'CONNECTED:%s:%s:%s\n' "${p:-default}" "$2" "$3" ;;
+esac
+STUB
+chmod +x "$REMOTE_HOME/bin/profiled"
+out=$("$CLI" host add gamma user@fake --host-bin '~/bin/profiled' --backend exe)
+grep -qx -- '--profile gamma init --backend exe' "$PROFILE_LOG"
+grep -qx -- '--profile gamma add-key' "$PROFILE_LOG"
+printf '%s\n' "$out" | grep -q 'boxery --host gamma build-base'
+grep -qx "HOST_PROFILE='gamma'" "$BOXERY_HOME/profiles/gamma/config"
+"$CLI" --host gamma ls | grep -q '^demo running gamma '
+proxy=$("$REAL_SSH" -F "$BOXERY_HOME/profiles/gamma/ssh_config" -G demo.boxery | sed -n 's/^proxycommand //p')
+proxy=${proxy//%h/demo.boxery}; proxy=${proxy//%p/22}
+sh -c "$proxy" | grep -q '^CONNECTED:gamma:demo.boxery:22$'
+# --profile reuses one that exists (no init); a missing one or a failed init registers nothing.
+: >"$PROFILE_LOG"
+"$CLI" host add gamma2 user@fake --host-bin '~/bin/profiled' --profile gamma >/dev/null
+if grep -q init "$PROFILE_LOG"; then echo '--profile ran init' >&2; exit 1; fi
+"$CLI" --host gamma2 ls | grep -q '^demo running gamma '
+for args in "--profile nosuch" "--backend broken" "--backend ../x" "--profile Bad"; do
+	# shellcheck disable=SC2086 # word-split on purpose
+	if "$CLI" host add delta user@fake --host-bin '~/bin/profiled' $args >/dev/null 2>&1; then echo "host add $args succeeded" >&2; exit 1; fi
+	[ ! -e "$BOXERY_HOME/host-registry/delta" ]; [ ! -e "$BOXERY_HOME/profiles/delta" ]
+done
+# setup is host add with a derived name, so --backend names the host-side profile after it.
+: >"$PROFILE_LOG"
+"$CLI" setup user@fake --name epsilon --host-bin '~/bin/profiled' --backend exe >/dev/null
+grep -qx -- '--profile epsilon init --backend exe' "$PROFILE_LOG"
+echo 'PASS: named registry, first-host default, setup naming, host listing, host-side profiles, import, safe removal, isolation, failures and remote quoting'

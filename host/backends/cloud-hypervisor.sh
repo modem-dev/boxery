@@ -115,12 +115,12 @@ ch_net_down() { ch_root ip link del "$CH_TAP$1" 2>/dev/null || true; }
 # Lowest free slot (1..250); slot 0 is the base-image builder. Serialized: concurrent `new`s race here.
 ch_alloc_slot() { # NAME → slot (written to the VM dir)
 	local lock=$CH_DIR/.slot.lock i s used
-	for i in $(seq 300); do mkdir "$lock" 2>/dev/null && break; sleep 0.1; [[ $i == 300 ]] && die "slot lock held ($lock)"; done
+	for i in $(seq 300); do take_lock "$lock" && break; sleep 0.1; [[ $i == 300 ]] && die "slot lock held ($lock)"; done
 	used=" $(cat "$CH_DIR"/vms/*/slot 2>/dev/null | tr '\n' ' ') "
 	for ((s = 1; s <= CH_MAX_SLOT; s++)); do [[ $used == *" $s "* ]] || break; done
-	if ((s > CH_MAX_SLOT)); then rmdir "$lock"; die "no free network slots (max $CH_MAX_SLOT VMs)"; fi
+	if ((s > CH_MAX_SLOT)); then rm -f "$lock"; die "no free network slots (max $CH_MAX_SLOT VMs)"; fi
 	echo "$s" >"$(ch_dir "$1")/slot"
-	rmdir "$lock"
+	rm -f "$lock"
 	echo "$s"
 }
 
@@ -186,11 +186,13 @@ backend_init() {
 }
 
 backend_proxy_services() {
+	local unit; unit=$(profile_unit boxery-ch-vsock)   # one per profile (#117)
+	retire_shared_unit boxery-ch-vsock "UNIX-LISTEN:$CH_DIR/proxy.sock,"
 	mkdir -p "$CH_DIR"
-	cat >"$HOME/.config/systemd/user/boxery-ch-vsock.service" <<-EOF
+	cat >"$HOME/.config/systemd/user/$unit.service" <<-EOF
 		[Unit]
 		Description=boxery: LLM proxy for cloud-hypervisor guests (hybrid vsock socket)
-		After=boxery-proxy.service
+		After=$PROXY_UNIT.service
 		[Service]
 		ExecStart=$(command -v socat) UNIX-LISTEN:$CH_DIR/proxy.sock,fork,unlink-early,mode=600 TCP:127.0.0.1:$PROXY_PORT
 		Restart=always
@@ -198,7 +200,7 @@ backend_proxy_services() {
 		[Install]
 		WantedBy=default.target
 	EOF
-	echo boxery-ch-vsock.service
+	echo "$unit.service"
 }
 guest_proxy_upstream() { echo "VSOCK-CONNECT:2:$PROXY_PORT"; }
 
@@ -283,15 +285,22 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 	backend_start "$name"
 }
 
-backend_list() { # → lines: NAME<TAB>STATE<TAB>ADDR<TAB>DISK
-	local d n st addr
+backend_list() { # → lines: NAME<TAB>STATE<TAB>SSH<TAB>DISK_BYTES<TAB>DISK_USED_BYTES
+	local d n st ssh disk size used
 	# An unreachable user manager would make every VM look stopped; that's an error, not an empty host.
 	systemctl --user show-environment >/dev/null 2>&1 || die "cannot reach the systemd user manager (systemctl --user)"
 	for d in "$CH_DIR"/vms/*/; do
 		[[ -f $d/slot ]] || continue
-		n=$(basename "$d") st="shut off" addr=""
-		if ch_active "$n"; then st=running addr=$(ch_ip "$n"); fi
-		printf '%s\t%s\t%s\t%s\n' "$n" "$st" "$addr" "$(du -k "$d/disk.qcow2" 2>/dev/null | awk '{ if ($1 < 1048576) printf "%.0fMiB", $1 / 1024; else printf "%.1fGiB", $1 / 1048576 }')"
+		n=$(basename "$d") st="shut off" ssh="" size="" used="" disk=${d%/}/disk.qcow2
+		if ch_active "$n"; then st=running ssh="$(ch_ip "$n"):22"; fi
+		if [[ -f $disk ]]; then
+			# virtual size from the qcow2 header (-U: the running VMM may hold the image); used = the
+			# overlay's allocated blocks (its backing base/stock image is shared and not counted)
+			size=$(qemu-img info -U --output=json "$disk" 2>/dev/null | jq -r '."virtual-size" // empty' 2>/dev/null) || size=""
+			used=$(du -k "$disk" 2>/dev/null | awk '{ print $1 }') || used=""
+			if [[ $used =~ ^[0-9]+$ ]]; then used=$((used * 1024)); else used=""; fi
+		fi
+		printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$st" "$ssh" "$size" "$used"
 	done
 }
 
@@ -340,7 +349,7 @@ backend_capture() { # NAME IMAGE   (VM may be running; it keeps running)
 	[[ ! -e $img ]] || die "image $2 exists"
 	mkdir -p "$CH_DIR/images"
 	if ch_active "$1"; then
-		vm_ssh_cmd "$(ch_ip "$1")" 22 sync >/dev/null 2>&1 || log "warning: couldn't sync $1's filesystems; $2 is crash-consistent"
+		vm_ssh_cmd "$1" "$(ch_ip "$1")" 22 sync >/dev/null 2>&1 || log "warning: couldn't sync $1's filesystems; $2 is crash-consistent"
 		ch_remote "$1" pause >/dev/null || die "pausing $1 failed"
 		if ! ch_copy "$d/disk.qcow2" "$img.part"; then
 			ch_remote "$1" resume >/dev/null 2>&1; rm -f "$img.part"; die "copying $1's disk failed"
@@ -381,7 +390,7 @@ backend_cleanup_new() { # NAME: remove a VM whose create was interrupted, whatev
 	systemctl --user daemon-reload || die "systemctl --user daemon-reload failed during recovery"
 	[[ -z $slot ]] || ch_net_down "$slot"
 	rm -rf "$d" || die "could not remove $d"
-	rmdir "$CH_DIR/.slot.lock" 2>/dev/null || true   # held only for milliseconds; a leftover means its holder died
+	rm -rf "$CH_DIR/.slot.lock"   # held only for milliseconds; a leftover means its holder died (-r: an older boxery's lock is a directory)
 }
 backend_cleanup_image() { rm -f "$(ch_image "$1")" "$(ch_image "$1").part" || die "could not remove image $1"; }
 backend_recover_capture() { # NAME IMAGE ORIGINAL_STATE: a capture died, maybe with NAME paused

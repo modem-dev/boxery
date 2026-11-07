@@ -7,8 +7,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 H=$ROOT/host/boxery-host
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-export BOXERY_CONF=$tmp/conf BOXERY_BACKEND=exe BOXERY_EXE_DIR=$tmp/exe BOXERY_EXE_PREFIX=bxtest- BOXERY_EXE_SUPERVISOR=systemd
-export BOXERY_EXE_POLL=0 BOXERY_PROXY_PORT=9999 BOXERY_SSH_WAIT_TRIES=2 HOME=$tmp/home CALLS=$tmp/calls.log UNITS=$tmp/units EXE_STATE=$tmp/cloud
+export BOXERY_CONF=$tmp/conf BOXERY_CACHE=$tmp/cache BOXERY_BACKEND=exe BOXERY_EXE_DIR=$tmp/exe BOXERY_EXE_PREFIX=bxtest- BOXERY_EXE_SUPERVISOR=systemd
+export BOXERY_EXE_POLL=0 BOXERY_PROXY_PORT=9999 BOXERY_SSH_WAIT_TRIES=2 HOME=$tmp/home CALLS=$tmp/calls.log UNITS=$tmp/units EXE_STATE=$tmp/cloud INTS=$tmp/integrations.json
 mkdir -p "$tmp/bin" "$BOXERY_CONF" "$HOME" "$UNITS" "$EXE_STATE"
 touch "$CALLS"
 # the stuck worker sleeps for a duration of our own (60.PID), so pgrep can't see other tests' sleeps
@@ -44,7 +44,9 @@ chmod +x "$tmp/bin/ssh"
 # The fake exe.dev lobby: VMs are $EXE_STATE/NAME/{status,comment,data,args}.
 cat >"$tmp/bin/fake-exe" <<'STUB'
 #!/usr/bin/env bash
-S=$EXE_STATE; cmd=$1; shift
+S=$EXE_STATE
+read -ra w <<<"$1"; shift; set -- "${w[@]}" "$@"   # real ssh joins its arguments: "billing plan", "integrations list"
+cmd=$1; shift
 pos=(); flags=()
 for a in "$@"; do case $a in --json) ;; --*) flags+=("$a") ;; *) pos+=("$a") ;; esac; done
 echo "exe.dev $cmd ${pos[*]} ${flags[*]}" >>"$CALLS"
@@ -58,8 +60,8 @@ ls)
 	for d in "$S"/*/; do
 		[ -d "$d" ] || continue; n=$(basename "$d")
 		if [ -n "${SSH_USER_MODE:-}" ]; then u="vm+$n" h=vm.exe.xyz; else u="" h=$n.exe.xyz; fi
-		jq -n --arg n "$n" --arg s "$(cat "$d/status")" --arg c "$(cat "$d/comment" 2>/dev/null)" --arg u "$u" --arg h "$h" \
-			'{vm_name: $n, status: $s, comment: $c, created_at: "2026-10-31T12:00:00Z", ssh_host: $h, ssh_dest: (if $u != "" then "\($u)@\($h)" else $h end)} + (if $u != "" then {ssh_user: $u} else {} end)'
+		jq -n --arg n "$n" --arg s "$(cat "$d/status")" --arg c "$(cat "$d/comment" 2>/dev/null)" --arg u "$u" --arg h "$h" --argjson t "$(cat "$d/tags" 2>/dev/null || echo null)" \
+			'{vm_name: $n, status: $s, comment: $c, tags: $t, created_at: "2026-10-31T12:00:00Z", ssh_host: $h, ssh_dest: (if $u != "" then "\($u)@\($h)" else $h end)} + (if $u != "" then {ssh_user: $u} else {} end)'
 	done | jq -s '{vms: .}' ;;
 new)
 	n=$(flag name); [ ! -d "$S/$n" ] || err "VM $n already exists"
@@ -77,6 +79,18 @@ comment) vm "${pos[0]}"; t=${pos[1]#\'}; echo "${t%\'}" >"$S/${pos[0]}/comment";
 pause) vm "${pos[0]}"; echo paused >"$S/${pos[0]}/status"; echo '{}' ;;
 resume | restart) vm "${pos[0]}"; echo running >"$S/${pos[0]}/status"; echo '{}' ;;
 egress) vm "${pos[0]}"; echo "${pos[1]}" >"$S/${pos[0]}/egress"; echo '{}' ;;
+billing) [ "${pos[0]}" = plan ] || err "unknown billing command"; [ -z "${FAIL_PLAN:-}" ] || exit 255
+	d='{"plan":"Personal","max_cpus":2,"max_memory_gb":4,"max_disk_gb":1024,"max_vms":50}'; echo "${PLAN:-$d}" ;;
+# The account's integrations ($INTS, JSON as `integrations list --json` prints it). New accounts: notify
+# and reflection on auto:all; this one has detached llm already.
+integrations)
+	[ -f "$INTS" ] || echo '[{"name":"notify","type":"notify","attachments":["auto:all"],"isTeam":false},{"name":"llm","type":"llm","attachments":[],"isTeam":false},{"name":"reflection","type":"reflection","attachments":["auto:all"],"isTeam":false}]' >"$INTS"
+	case ${pos[0]} in
+	list) [ -z "${FAIL_INT:-}" ] || exit 255; cat "$INTS" ;;
+	detach) jq -e --arg n "${pos[1]}" --arg s "${pos[2]}" 'any(.[]; .name == $n and (.attachments | index($s)))' "$INTS" >/dev/null || err "${pos[1]} is not attached to ${pos[2]}"
+		jq --arg n "${pos[1]}" --arg s "${pos[2]}" 'map(if .name == $n then .attachments -= [$s] else . end)' "$INTS" >"$INTS.t" && mv "$INTS.t" "$INTS"; echo '{}' ;;
+	*) err "unknown integrations command ${pos[0]}" ;;
+	esac ;;
 resize) vm "${pos[0]}"; [ -z "${FAIL_RESIZE:-}" ] || err "injected resize failure"; echo "${flags[*]}" >"$S/${pos[0]}/resized"; echo '{}' ;;
 *) err "unknown command $cmd" ;;
 esac
@@ -148,6 +162,10 @@ up=$(grep -F '/etc/boxery/proxy-upstream' "$I" | grep -o 'echo [A-Za-z0-9+/=]*' 
 [[ $up == "TCP:127.0.0.1:18088" ]] && ok "guest proxy upstream is the tunnel's -R end" || bad "upstream: $up"
 grep -F 'systemd-machine-id-setup' "$I" >/dev/null && grep -F 'ssh-keygen -A' "$I" >/dev/null && grep -F 'echo v1 >/etc/boxery/hostname' "$I" >/dev/null && ok "fresh machine-id, host keys, hostname" || bad "identity"
 grep -F 'boxery-novnc' "$I" >/dev/null && grep -F 'git init -q' "$I" >/dev/null && ok "runcmd steps: desktop services, ~/project" || bad "runcmd"
+grep -F "sudo -u agent bash -lc 'cd && git config --global user.name agent;" "$I" >/dev/null && ok "agent's git config runs from agent's home (exeuntu's /home/exedev/.git is unreadable)" || bad "git config cwd"
+hk=$(grep -F '"/etc/ssh/boxery_host_ed25519_key.pub"' "$I" | grep -o 'echo [A-Za-z0-9+/=]*' | head -1 | cut -c6- | base64 -d 2>/dev/null || true)
+[[ -n $hk && "v1.boxery $hk" == "$(cat "$BOXERY_CONF/host-keys/v1")" ]] && grep -F '"/etc/ssh/sshd_config.d/05-boxery-hostkey.conf"' "$I" >/dev/null &&
+	ok "pinned host key (#70): the seeded key is written and is the one boxery-host recorded" || bad "pinned key: $hk / $(cat "$BOXERY_CONF/host-keys/v1" 2>&1)"
 U=$HOME/.config/systemd/user/boxery-exe-bxtest-v-v1.service
 grep -F "ExecStart=$E/v1/tunnel.sh" "$U" >/dev/null && grep -F 'Restart=always' "$U" >/dev/null && ok "tunnel runs as a restarting user unit" || bad "unit: $(cat "$U")"
 [[ -f $UNITS/enabled.boxery-exe-bxtest-v-v1.service && -f $UNITS/boxery-exe-bxtest-v-v1.service ]] && ok "tunnel enabled (survives host reboots) and running" || bad "unit state"
@@ -161,7 +179,7 @@ done
 "$H" new v2 --disk 60 >/dev/null 2>&1
 called "exe.dev cp bxtest-base $(V v2) --copy-tags=false --cpu=2 --memory=4GB --disk=60GB" && [[ $(cat "$E/v2/slot") == 2 ]] && ok "bigger disk is passed; second VM gets slot 2" || bad "v2: $(grep 'exe.dev cp' "$CALLS")"
 j=$(lsj)
-jq -e 'map(select(.name == "v1"))[0] | .state == "running" and .addr == "127.0.0.1:22401" and .disk == "20GiB"' <<<"$j" >/dev/null && ok "ls --json: running, tunnel address, disk" || bad "ls: $j"
+jq -e 'map(select(.name == "v1"))[0] | .state == "running" and .ssh_addr == "127.0.0.1:22401" and .disk_size == 20 and .disk_used == null' <<<"$j" >/dev/null && ok "ls --json: running, tunnel address, disk" || bad "ls: $j"
 jq -e 'map(.name) | sort == ["v1", "v2"]' <<<"$j" >/dev/null && ok "ls lists boxery VMs only (not the base, images or the account's other VMs)" || bad "ls names: $j"
 [[ $("$H" ip v1) == 127.0.0.1 ]] && ok "ip" || bad ip
 
@@ -176,6 +194,42 @@ grep -x 'ListenAddress 127.0.0.1' "$X" >/dev/null && grep -F 'boxery-exe-boot.se
 ! grep -F '/home/agent/.boxery/token' "$X" >/dev/null && grep -F '/home/agent/.boxery/token' "$S/$(V hx)/script.2" >/dev/null && ok "identity (proxy token) comes after, in its own script" || bad "script order"
 "$H" rm hx >/dev/null 2>&1
 
+# --- exe.dev integrations: allowed (the owner's choice), but boxery says when one reaches a VM
+called "exe.dev integrations list" && ok "new checks which exe.dev integrations reach the VM" || bad "no integration check on new"
+ints() { cp "$INTS" "$tmp/ints.saved"; jq "$1" "$tmp/ints.saved" >"$INTS"; }   # FILTER: change the account's integrations
+unints() { mv "$tmp/ints.saved" "$INTS"; }
+warned() { # DESC WANT CMD…: CMD succeeds and its warning names WANT (empty: says it couldn't check, or no warning with NONE)
+	local d=$1 want=$2 e; shift 2
+	if ! e=$("$@" 2>&1); then bad "$d: failed: $e"; return; fi
+	case $want in
+	NONE) [[ $e != *"exe.dev integration"* ]] && ok "$d: no warning" || bad "$d: $e" ;;
+	"") [[ $e == *"couldn't check which exe.dev integrations reach"* ]] && ok "$d: says it couldn't check, still succeeds" || bad "$d: $e" ;;
+	*) [[ $e == *"can use exe.dev integration(s) $want, with credentials exe.dev holds"* ]] && ok "$d: succeeds, warns naming $want" || bad "$d: $e" ;;
+	esac
+	LAST=$e
+}
+warned "no credential integration (notify and reflection on auto:all)" NONE "$H" new lx; "$H" rm lx >/dev/null 2>&1
+warned "integrations list fails" "" env FAIL_INT=1 "$H" new lx; "$H" rm lx >/dev/null 2>&1
+ints '. + [{"name":"anth","type":"anthropic-wif","attachments":["auto:all"],"isTeam":false}]'
+warned "an Anthropic workload-identity integration on auto:all" anth "$H" new lx
+[[ $LAST == *"ssh exe.dev integrations detach anth auto:all"* && $LAST == *"affects the account's other VMs too"* && $LAST == *"BOXERY_EXE_ALLOW_INTEGRATIONS=NAME"* ]] && ok "… with the detach command, what it affects, and how to silence it" || bad "fix: $LAST"
+"$H" rm lx >/dev/null 2>&1
+warned "BOXERY_EXE_ALLOW_INTEGRATIONS silences a named one" NONE env BOXERY_EXE_ALLOW_INTEGRATIONS=other,anth "$H" new lx
+"$H" rm lx >/dev/null 2>&1; unints
+ints 'map(if .name == "llm" then .attachments = ["tag:gpu"] | .isTeam = true else . end)'
+warned "an integration on a tag the VM doesn't have doesn't count" NONE "$H" new lx
+"$H" rm lx >/dev/null 2>&1; unints
+expect "stop v2" "$H" stop v2
+ints 'map(if .name == "llm" then .attachments = ["auto:all"] else . end)'
+warned "start: llm attached later (auto:all)" llm "$H" start v2
+[[ $(st "$(V v2)") == running && -f $UNITS/boxery-exe-bxtest-v-v2.service ]] && ok "… and v2 runs with its tunnel" || bad "start: $(st "$(V v2)")"
+unints; expect "stop v2" "$H" stop v2
+echo '["gpu"]' >"$S/$(V v2)/tags"
+ints 'map(if .name == "llm" then .attachments = ["tag:gpu"] | .isTeam = true else . end)'
+warned "start: a team integration on one of the VM's tags" llm "$H" start v2
+[[ $LAST == *"integrations detach llm tag:gpu --team"* ]] && ok "… with --team in the detach command" || bad "tag: $LAST"
+unints; rm "$S/$(V v2)/tags"
+
 # --- size / resize
 [[ $("$ROOT/host/backend.sh" backend_size v1 2>/dev/null) == "2 4096 20" ]] && ok "backend_size: the size exe.dev was given (capped)" || bad "size: $("$ROOT/host/backend.sh" backend_size v1 2>&1)"
 : >"$CALLS"
@@ -186,13 +240,39 @@ expect_fail "disks don't shrink" "$H" resize v1 --disk 25
 expect "resize back to 2 vCPU" "$H" resize v1 --cpus 2
 [[ $("$ROOT/host/backend.sh" backend_size v1 2>/dev/null) == "2 4096 30" ]] && ok "backend_size follows resizes" || bad "size: $(cat "$E/v1/size")"
 
+# --- the account's limits (billing plan), not a fixed Personal-plan cap (#40)
+: >"$CALLS"
+out=$(PLAN='{"plan":"Personal","max_cpus":8,"max_memory_gb":16,"max_disk_gb":400}' "$H" new big --cpus 4 --mem 8192 --disk 30 2>"$tmp/err") &&
+	called "exe.dev cp bxtest-base $(V big) --copy-tags=false --cpu=4 --memory=8GB --disk=30GB" && ! grep -F capping "$tmp/err" >/dev/null &&
+	ok "an 8 vCPU / 16 GB account: a 4 vCPU / 8 GB VM isn't capped" || bad "big: $out $(cat "$tmp/err") $(grep 'exe.dev cp' "$CALLS")"
+[[ $(jq -c . "$BOXERY_EXE_DIR/plan.json") == '{"max_cpus":8,"max_memory_gb":16,"max_disk_gb":400}' ]] && ok "the account's limits are kept for when exe.dev can't be asked" || bad "plan.json: $(cat "$BOXERY_EXE_DIR/plan.json")"
+: >"$CALLS"
+FAIL_PLAN=1 "$H" resize big --cpus 16 2>"$tmp/err" && called "exe.dev resize $(V big) --cpu=8" && grep -F "using the last ones" "$tmp/err" >/dev/null &&
+	ok "billing unreachable: the last known limits, said so" || bad "cached: $(cat "$tmp/err") $(grep 'exe.dev resize' "$CALLS")"
+e=$(PLAN='{"max_cpus":8,"max_memory_gb":16,"max_disk_gb":400}' "$H" resize big --disk 500 2>&1) && bad "a disk beyond the account's limit was accepted" ||
+	{ [[ $e == *"exe.dev disks are at most 400 GB on this account (asked for 500)"* && $(cat "$E/big/disk") == 30 ]] && ok "a disk beyond the account's limit is refused, size unchanged" || bad "disk: $e"; }
+: >"$CALLS"
+BOXERY_EXE_MAX_CPUS=1 "$H" resize big --cpus 4 >/dev/null 2>&1 && called "exe.dev resize $(V big) --cpu=1" && ok "BOXERY_EXE_MAX_CPUS overrides the account's limit" || bad "override: $(grep 'exe.dev resize' "$CALLS")"
+"$H" rm big >/dev/null 2>&1
+(export FAIL_PLAN=1; BOXERY_EXE_DIR=$tmp/noplan; mkdir -p "$tmp/noplan"; . "$ROOT/host/backends/exe.sh"; log() { echo "$*" >&2; }; exe_limits; echo "$EXE_MAX_CPUS $EXE_MAX_MEM [$EXE_MAX_DISK]") >"$tmp/out" 2>"$tmp/err"
+[[ $(cat "$tmp/out") == "2 4096 []" ]] && grep -F "assuming 2 vCPU / 4 GB" "$tmp/err" >/dev/null && ok "no answer and none kept: 2 vCPU / 4 GB, said so" || bad "no plan: $(cat "$tmp/out" "$tmp/err")"
+(export PLAN='{"max_cpus":"$(touch '"$tmp"'/pwned4)","max_memory_gb":-3}'; BOXERY_EXE_DIR=$tmp/noplan2; mkdir -p "$tmp/noplan2"; . "$ROOT/host/backends/exe.sh"; log() { :; }; exe_limits; echo "$EXE_MAX_CPUS $EXE_MAX_MEM") >"$tmp/out" 2>/dev/null
+[[ $(cat "$tmp/out") == "2 4096" && ! -e $tmp/pwned4 ]] && ok "hostile or odd plan fields fall back to the defaults" || bad "hostile plan: $(cat "$tmp/out")"
+# A fork's creates read the limits at the same time. Live, with one shared temp file, a create's mv found
+# it already moved and, under the backend's set -e, its create failed. Caching is best effort.
+(BOXERY_EXE_DIR=$tmp/par; mkdir -p "$tmp/par"; . "$ROOT/host/backends/exe.sh"; log() { :; }; set -euo pipefail
+	mv() { return 1; }   # another create moved it first
+	exe_limits; echo "$EXE_MAX_CPUS" >"$tmp/par/out") 2>"$tmp/err" || true
+left=("$tmp"/par/plan.json.*)
+[[ $(cat "$tmp/par/out" 2>/dev/null) == 2 && ! -e ${left[0]} ]] && ok "a cache write that loses a race doesn't fail the create, and leaves no temp file" || bad "exe_limits under set -e: $(cat "$tmp/err") ${left[*]}"
+
 # --- stop / start
 : >"$CALLS"
 expect "stop" "$H" stop v1
 called "exe.dev pause $(V v1)" && grep -F 'sudo rm -rf /run/user/*/boxery; sync' "$S/$(V v1)/edge.log" >/dev/null && ok "stop drops pushed grants and syncs, then pauses" || bad "stop: $(cat "$CALLS")"
 grep -F 'ssh -a -x -o ForwardAgent=no' "$CALLS" >/dev/null && ok "edge ssh never forwards the host's agent" || bad "agent forwarding not disabled"
 [[ ! -f $UNITS/boxery-exe-bxtest-v-v1.service ]] && ok "stop stops the tunnel" || bad "tunnel still up"
-lsj | jq -e 'map(select(.name == "v1"))[0] | .state == "paused" and .addr == null' >/dev/null && ok "paused VM: no addr" || bad "ls stopped: $(lsj)"
+lsj | jq -e 'map(select(.name == "v1"))[0] | .state == "paused" and .ssh_addr == null' >/dev/null && ok "paused VM: no addr" || bad "ls stopped: $(lsj)"
 expect_fail "ip of a stopped VM fails" "$H" ip v1
 : >"$CALLS"
 expect "start" "$H" start v1
@@ -211,7 +291,7 @@ expect "resize back to 4 GB" "$H" resize v1 --mem 4096
 UV=boxery-exe-bxtest-v-v1.service
 jq -e 'map(select(.name == "v1"))[0].tunnel == "up"' <<<"$(lsj)" >/dev/null && ok "ls --json: tunnel up" || bad "tunnel: $(lsj)"
 rm -f "$UNITS/$UV"   # enabled, between restarts: ssh can't reach exe.dev
-lsj | jq -e 'map(select(.name == "v1"))[0] | .state == "running" and .addr == null and .tunnel == "connecting"' >/dev/null && ok "ls --json: reconnecting tunnel, no addr" || bad "ls: $(lsj)"
+lsj | jq -e 'map(select(.name == "v1"))[0] | .state == "running" and .ssh_addr == null and .tunnel == "connecting"' >/dev/null && ok "ls --json: reconnecting tunnel, no addr" || bad "ls: $(lsj)"
 "$H" ls | grep -E '^v1 +running +tunnel connecting ' >/dev/null && ok "ls shows the tunnel state in place of the address" || bad "ls: $("$H" ls)"
 "$H" ls | awk 'NR == 1 { d = index($0, "DISK") } $1 == "v1" { f = (substr($0, d - 1, 1) == " " && substr($0, d, 1) != " ") } END { exit !f }' && ok "ls: tunnel connecting fits ADDR (DISK stays aligned)" || bad "ls alignment: $("$H" ls)"
 e=$("$H" connect v1 2>&1) && bad "connect through a reconnecting tunnel succeeded" ||
@@ -260,6 +340,16 @@ new=$(V v1)
 [[ $(cat "$S/$new/data") == v1-work && $(gens v1) == "$new " && $(cat "$E/v1/slot") == 1 && -f $UNITS/boxery-exe-bxtest-v-v1.service ]] && ok "disk restored, old VM gone, slot kept, tunnel up" || bad "after revert: $(gens v1)"
 grep -F "$new.exe.xyz" "$E/v1/tunnel.sh" >/dev/null && ok "tunnel follows the new exe.dev name" || bad "tunnel.sh: $(cat "$E/v1/tunnel.sh")"
 expect_fail "revert to an unknown snapshot fails" "$H" revert v1 nope
+# A reimage (revert, pool reset) is a new exe.dev VM: auto:all integrations attach to it too.
+ints 'map(if .name == "llm" then .attachments = ["auto:all"] else . end)'
+warned "reimage: llm on auto:all" llm "$H" revert v1 s1
+unints
+# A revert that failed before changing anything exits 3, so recovery doesn't finish it later (and
+# throw away what the VM did since): the next operation on it leaves it alone.
+old=$(V v1); echo after-failed-revert >"$S/$old/data"
+FAIL_CP=1 expect_fail "a revert whose copy fails fails" "$H" revert v1 s1
+"$H" stop v1 >/dev/null 2>&1; "$H" start v1 >/dev/null 2>&1
+[[ $(V v1) == "$old" && $(cat "$S/$old/data") == after-failed-revert ]] && ok "failed reverts aren't finished by a later stop/start: the VM keeps its newer data" || bad "replayed: $(V v1) $(cat "$S/$(V v1)/data")"
 
 # --- new --from / fork
 : >"$CALLS"
@@ -304,8 +394,9 @@ mkdir -p "$E/half" "$S/bxtest-v0000aa-half" "$S/bxtest-v0000bb-half"; echo 77 >"
 touch "$HOME/.config/systemd/user/boxery-exe-bxtest-v-half.service" "$UNITS/boxery-exe-bxtest-v-half.service"
 rec backend_cleanup_new half && [[ ! -d $E/half && -z $(gens half) && ! -f $UNITS/boxery-exe-bxtest-v-half.service && ! -f $HOME/.config/systemd/user/boxery-exe-bxtest-v-half.service ]] && ok "cleanup_new removes a half-created VM: every exe.dev generation, tunnel, state" || bad "cleanup_new: $(gens half)"
 rec backend_cleanup_new half && ok "cleanup_new is idempotent" || bad "cleanup_new second run"
-mkdir "$BOXERY_EXE_DIR/.slot.lock" && rec backend_cleanup_new nothing && [[ -d $BOXERY_EXE_DIR/.slot.lock ]] && ok "cleanup_new leaves a fresh slot lock (a live new may hold it)" || bad "fresh slot lock removed"
-touch -t 202001010000 "$BOXERY_EXE_DIR/.slot.lock" && rec backend_cleanup_new nothing && [[ ! -d $BOXERY_EXE_DIR/.slot.lock ]] && ok "cleanup_new clears a dead holder's stale slot lock" || bad "stale slot lock"
+: >"$BOXERY_EXE_DIR/.slot.lock" && rec backend_cleanup_new nothing && [[ -f $BOXERY_EXE_DIR/.slot.lock ]] && ok "cleanup_new leaves a fresh slot lock (a live new may hold it)" || bad "fresh slot lock removed"
+touch -t 202001010000 "$BOXERY_EXE_DIR/.slot.lock" && rec backend_cleanup_new nothing && [[ ! -e $BOXERY_EXE_DIR/.slot.lock ]] && ok "cleanup_new clears a dead holder's stale slot lock" || bad "stale slot lock"
+mkdir "$BOXERY_EXE_DIR/.slot.lock" && touch -t 202001010000 "$BOXERY_EXE_DIR/.slot.lock" && rec backend_cleanup_new nothing && [[ ! -e $BOXERY_EXE_DIR/.slot.lock ]] && ok "cleanup_new clears an older boxery's stale slot lock directory" || bad "stale slot lock directory"
 FAIL_LS=1 rec backend_cleanup_new p1 2>/dev/null && bad "cleanup_new succeeded without exe.dev" || ok "cleanup_new fails (keeps the journal) when exe.dev is unreachable"
 mkdir -p "$S/$(img x@y)"; echo running >"$S/$(img x@y)/status"   # a cp killed before its comment
 rec backend_cleanup_image x@y && [[ ! -d $S/$(img x@y) ]] && rec backend_cleanup_image x@y && ok "cleanup_image removes an unlabelled image, idempotently" || bad "cleanup_image"
@@ -328,6 +419,7 @@ pgrep -f "sleep $STUCK\$" >/dev/null && { bad "abandoned worker still running"; 
 
 # --- helpers (sourced)
 die() { echo "$*" >&2; exit 1; }; log() { :; }; need() { :; }   # helpers that die run in ( subshells )
+eval "$(grep '^take_lock()' "$ROOT/host/backend.sh")"   # the real lock helper (host/backend.sh defines it for every backend)
 PROXY_PORT=9999
 # shellcheck source=/dev/null
 . "$ROOT/host/backends/exe.sh"
@@ -338,6 +430,14 @@ PROXY_PORT=9999
 p1=$(unset BOXERY_EXE_PREFIX; BOXERY_EXE_DIR=$tmp/fresh; . "$ROOT/host/backends/exe.sh"; backend_init; echo "$EXE_PREFIX")
 p2=$(unset BOXERY_EXE_PREFIX; BOXERY_EXE_DIR=$tmp/fresh; . "$ROOT/host/backends/exe.sh"; echo "$EXE_PREFIX")
 [[ $p1 =~ ^bx[0-9a-f]{6}-$ && $p1 == "$p2" ]] && ok "init generates a prefix once and keeps it" || bad "prefix: $p1 / $p2"
+# init warns on a host with a battery (#42): macOS via pmset, Linux via sysfs; quiet otherwise
+initlog() { (BOXERY_EXE_DIR=$tmp/fresh; . "$ROOT/host/backends/exe.sh"; log() { echo "$*"; }; "$@"; backend_init) 2>&1; }
+mkdir -p "$tmp/ps/AC" "$tmp/ps/BAT0"; echo Mains >"$tmp/ps/AC/type"; echo Battery >"$tmp/ps/BAT0/type"
+[[ $(initlog eval 'uname() { echo Linux; }; EXE_POWER_SUPPLY=$tmp/ps') == *"has a battery"*"always-on machine"* ]] && ok "init warns on a Linux host with a battery" || bad "linux battery: $(initlog eval 'uname() { echo Linux; }; EXE_POWER_SUPPLY=$tmp/ps')"
+rm -r "$tmp/ps/BAT0"
+[[ -z $(initlog eval 'uname() { echo Linux; }; EXE_POWER_SUPPLY=$tmp/ps') && -z $(initlog eval 'uname() { echo Linux; }; EXE_POWER_SUPPLY=$tmp/none') ]] && ok "… and not on one without" || bad "linux mains: $(initlog eval 'uname() { echo Linux; }; EXE_POWER_SUPPLY=$tmp/ps')"
+[[ $(initlog eval 'uname() { echo Darwin; }; pmset() { echo " -InternalBattery-0 (id=1)	84%; discharging"; }') == *"has a battery"* ]] && ok "init warns on a Mac laptop (pmset)" || bad "mac battery"
+[[ -z $(initlog eval 'uname() { echo Darwin; }; pmset() { echo "Now drawing from '"'AC Power'"'"; }') ]] && ok "… and not on a Mac without a battery" || bad "mac desktop: $(initlog eval 'uname() { echo Darwin; }; pmset() { echo AC; }')"
 e=$( (UNREGISTERED=1 backend_check) 2>&1 ) && bad "unregistered key accepted" || { [[ $e == *"ssh exe.dev"* ]] && ok "unregistered key: says how to register" || bad "check: $e"; }
 [[ $(SSH_USER_MODE=1 exe_dest bxtest-base) == "-l vm+bxtest-base vm.exe.xyz" ]] && ok "ssh_user routing (vm+NAME@vm.exe.xyz) is honoured" || bad "dest: $(SSH_USER_MODE=1 exe_dest bxtest-base)"
 : >"$CALLS"
@@ -348,6 +448,21 @@ called "exe.dev cp $(V eg) $(img eg@c) --copy-tags=false --pool=build --egress=i
 evil='{"vms":[{"vm_name":"x","comment":"boxery-image:a@b:x[$(touch '"$tmp"'/pwned)]","ssh_host":"-oProxyCommand=touch '"$tmp"'/pwned2"}]}'
 d=$(exe_disk_of_image x "$evil"); h=$(exe_dest x "$evil")
 [[ -z $d && $h == x.exe.xyz && ! -e $tmp/pwned && ! -e $tmp/pwned2 ]] && ok "hostile exe.dev fields (disk, ssh_host) are rejected" || bad "disk='$d' dest='$h'"
+# exe_int_attached: which integrations count, for which VM; hostile fields never get into a command
+J='[{"name":"llm","type":"llm","attachments":["auto:all","tag:gpu"]},{"name":"gh","type":"github","attachments":["vm:bxtest-v000001-a","vm:other"],"isTeam":true},
+	{"name":"notify","type":"notify","attachments":["auto:all"]},{"name":"reflection","type":"reflection","attachments":["auto:all"]},
+	{"name":"x;touch '"$tmp"'/pwned3","type":"http-proxy","attachments":["auto:all"]},{"name":"p","type":"http-proxy","attachments":["auto:all;rm -rf /","vm:a b"]}]'
+[[ $(exe_int_attached "$J" '[]' bxtest-v000001-a) == $'llm\tauto:all\t\ngh\tvm:bxtest-v000001-a\t--team' ]] && ok "integrations: auto:all and vm:VM count; notify and reflection don't" || bad "attached: $(exe_int_attached "$J" '[]' bxtest-v000001-a)"
+[[ $(exe_int_attached "$J" '["gpu"]' bxtest-v000002-b | cut -f2 | paste -sd, -) == "auto:all,tag:gpu" ]] && ok "integrations: tag:T counts for a VM tagged T" || bad "tags"
+[[ $(exe_int_attached "$J" '[]' "" | cut -f1,2 | paste -sd, - | tr '\t' ' ') == "llm auto:all,gh vm:bxtest-v000001-a" ]] && ok "integrations at init: auto:all and boxery's own vm: attachments" || bad "init set: $(exe_int_attached "$J" '[]' "")"
+[[ $(BOXERY_EXE_ALLOW_INTEGRATIONS=llm; . "$ROOT/host/backends/exe.sh"; exe_int_attached "$J" '[]' "" | cut -f1) == gh && ! -e $tmp/pwned3 ]] && ok "integrations: allowed names skipped; hostile names and specs dropped" || bad "allow/hostile"
+# init (#41): lists what reaches boxery's VMs, with the detach commands; changes nothing
+ints '. + [{"name":"anth","type":"anthropic-wif","attachments":["auto:all","vm:bxtest-vabcdef-x"],"isTeam":false}]'
+e=$( (log() { echo "$*" >&2; }; backend_init) 2>&1)
+[[ $e == *"every boxery VM can use exe.dev integration(s) anth"* && $e == *"ssh exe.dev integrations detach anth auto:all"* && $e == *"ssh exe.dev integrations detach anth vm:bxtest-vabcdef-x"* ]] && ok "init: names each attachment and the command" || bad "init msg: $e"
+[[ $(jq -c '.[] | select(.name == "anth") | .attachments' "$INTS") == '["auto:all","vm:bxtest-vabcdef-x"]' ]] && ok "init changes nothing on the account" || bad "init: $(cat "$INTS")"
+e=$( (log() { echo "$*" >&2; }; FAIL_INT=1 backend_init) 2>&1) && [[ $e == *"couldn't list exe.dev integrations"* ]] && ok "init: integrations unreachable → a warning, init still succeeds" || bad "init fail: $e"
+unints
 # launchd (macOS hosts)
 stub launchctl 'echo "launchctl $*" >>"$CALLS"; case $1 in print) [[ -f $UNITS/launchd ]] ;; bootstrap) touch "$UNITS/launchd" ;; bootout) rm -f "$UNITS/launchd" ;; esac'
 : >"$CALLS"
@@ -361,5 +476,16 @@ e=$(BOXERY_EXE_SUPERVISOR=launchd; export NC_DOWN=1; . "$ROOT/host/backends/exe.
 	{ [[ $e == *"(last error: ssh: Could not resolve hostname x.exe.xyz)"* && $e == *"log: $E/v3/tunnel.log"* ]] && ok "launchd: a reconnecting tunnel quotes its last error and log" || bad "launchd problem: $e"; }
 (BOXERY_EXE_SUPERVISOR=launchd; . "$ROOT/host/backends/exe.sh"; exe_tunnel_stop v3; ! exe_tunnel_active v3) && [[ ! -f $PL ]] && ok "launchd: stop boots it out and removes it from LaunchAgents" || bad "launchd stop"
 [[ $(BOXERY_EXE_SUPERVISOR=launchd; . "$ROOT/host/backends/exe.sh"; exe_tunnel_state v3) == down ]] && ok "launchd: booted out = down" || bad "launchd down"
+# launchd still removing the old job: print finds it for 2 more calls, and the first 2 bootstraps fail
+stub launchctl 'echo "launchctl $*" >>"$CALLS"; n() { cat "$UNITS/$1" 2>/dev/null || echo 0; }
+case $1 in
+print) l=$(n linger); if ((l > 0)); then echo $((l - 1)) >"$UNITS/linger"; else [[ -f $UNITS/launchd ]]; fi ;;
+bootstrap) f=$(n fails); if ((f > 0)); then echo $((f - 1)) >"$UNITS/fails"; echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi; touch "$UNITS/launchd" ;;
+bootout) rm -f "$UNITS/launchd"; echo 2 >"$UNITS/linger" ;;
+esac'
+: >"$CALLS"; echo 2 >"$UNITS/fails"
+(BOXERY_EXE_SUPERVISOR=launchd; . "$ROOT/host/backends/exe.sh"; exe_tunnel_write v3 "$(exe_ls)"; exe_tunnel_start v3 2>/dev/null; exe_tunnel_active v3) &&
+	[[ $(grep -c '^launchctl bootstrap' "$CALLS") == 3 ]] && ok "launchd: start outlasts a job still being removed (waits, retries the bootstrap)" || bad "launchd race: $(cat "$CALLS")"
+(BOXERY_EXE_SUPERVISOR=launchd; . "$ROOT/host/backends/exe.sh"; exe_tunnel_stop v3); rm -f "$UNITS/linger" "$UNITS/fails"
 
 echo "passed: $pass  failed: $fail"; ((fail == 0))

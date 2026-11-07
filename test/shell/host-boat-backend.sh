@@ -2,12 +2,12 @@
 # boat.dev backend tests: boxery-host + host/backends/boat.sh against a fake boat API (no account, no
 # network). A stub curl serves the REST API from directories; a stub ssh records what the backend runs in
 # sandboxes as `user` (checking the pinned host key) and accepts the boxery-host → guest sshd hops
-# (agent@127.0.0.1 through the tunnel). systemctl and nc are stubbed as in host-exe-backend.sh.
+# (agent@127.0.0.1 through the tunnel). systemctl, launchctl and nc are stubbed as in host-exe-backend.sh.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 H=$ROOT/host/boxery-host
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-export BOXERY_CONF=$tmp/conf BOXERY_BACKEND=boat BOXERY_BOAT_DIR=$tmp/boat BOXERY_BOAT_PREFIX=bxtest- BOXERY_BOAT_SUPERVISOR=systemd
+export BOXERY_CONF=$tmp/conf BOXERY_CACHE=$tmp/cache BOXERY_BACKEND=boat BOXERY_BOAT_DIR=$tmp/boat BOXERY_BOAT_PREFIX=bxtest- BOXERY_BOAT_SUPERVISOR=systemd
 export BOXERY_BOAT_POLL=0 BOXERY_BOAT_RETRIES=1 BOXERY_REMOTE_BUILD_TIMEOUT=5 BOXERY_PROXY_PORT=9999 BOXERY_SSH_WAIT_TRIES=2
 export BOAT_API_KEY=boat_testkey123 FAKE_BOAT_KEY=boat_testkey123 HOME=$tmp/home CALLS=$tmp/calls.log UNITS=$tmp/units BOAT_STATE=$tmp/cloud
 mkdir -p "$tmp/bin" "$BOXERY_CONF" "$HOME" "$UNITS" "$BOAT_STATE/sb" "$BOAT_STATE/saved"
@@ -27,7 +27,9 @@ while [ $# -gt 0 ]; do
 	case $1 in
 	-X) m=$2; shift 2 ;;
 	-H) hdrs+=("$2"); shift 2 ;;
-	-K) auth=$(sed -n 's/^header = "\(.*\)"$/\1/p' "$2"); shift 2 ;;
+	-K) if [ "$2" = - ]; then cfg=$(cat); else cfg=$(cat "$2"); fi   # curl config: header and data-binary (on stdin: -K -)
+		auth=$(printf '%s\n' "$cfg" | sed -n 's/^header = "\(.*\)"$/\1/p')
+		body=$(printf '%s\n' "$cfg" | sed -n 's/^data-binary = "\(.*\)"$/\1/p' | sed 's/\\"/"/g; s/\\\\/\\/g'); shift 2 ;;
 	--data-binary) body=$(cat); shift 2 ;;
 	-w | --max-time) shift 2 ;;
 	-*) shift ;;
@@ -146,7 +148,10 @@ stop) rm -f "$UNITS/$3" ;;
 is-active) [[ -f "$UNITS/$4" ]] ;;
 esac'
 stub nc 'echo "nc $*" >>"$CALLS"'
-export PATH="$tmp/bin:$PATH"
+# init loads the proxy service on macOS too: never through the real launchctl, whose gui/UID domain is
+# this account's (with HOME a temp dir, it replaced the real dev.boxery-proxy job).
+stub launchctl 'echo "launchctl $*" >>"$CALLS"'
+export PATH="$tmp/bin:$PATH" BOXERY_STUB_SERVICES=1
 S=$BOAT_STATE E=$BOXERY_BOAT_DIR/vms
 
 pass=0; fail=0
@@ -189,6 +194,7 @@ jq -se 'map(select(.name == "bxtest-build")) | last | .type == "default" and .tt
 grep -F 'curl POST /sandboxes/'"$bb"'/sshkey {"key":"ssh-ed25519 ' "$CALLS" >/dev/null && ok "the host's admin key is authorized through the API" || bad "sshkey"
 [[ $(grep -c "curl POST /sandboxes/$bb/sshkey" "$CALLS") -ge 2 ]] && ok "the build poller re-pins a builder whose host key changed" || bad "no re-pin: $(grep -c "sshkey" "$CALLS")"
 die() { echo "$*" >&2; exit 1; }; log() { :; }; need() { :; }
+eval "$(grep '^take_lock()' "$ROOT/host/backend.sh")"   # the real lock helper (host/backend.sh defines it for every backend)
 PROXY_PORT=9999
 cp "$S/build-script" "$tmp/build.sh"   # the last build's script, as the builder received it
 bash -n "$tmp/build.sh" && ok "build script parses" || bad "build script syntax"
@@ -215,6 +221,8 @@ grep -F 'systemd-machine-id-setup' "$I" >/dev/null && grep -F 'echo v1 >/etc/box
 up=$(grep -F '/etc/boxery/proxy-upstream' "$I" | grep -o 'echo [A-Za-z0-9+/=]*' | head -1 | cut -c6- | base64 -d 2>/dev/null || true)
 [[ $up == "TCP:127.0.0.1:18088" ]] && ok "guest proxy upstream is the tunnel's -R end" || bad "upstream: $up"
 [[ $(cat "$E/v1/known_hosts") == "$(ID v1) $(cat "$S/sb/$(ID v1)/hostkey")" ]] && ok "host key from the API pinned under the sandbox id" || bad "known_hosts: $(cat "$E/v1/known_hosts")"
+! grep -F 'boxery_host_ed25519_key' "$I" >/dev/null && [[ $("$ROOT/host/backend.sh" backend_platform_host_key v1) == "$(cat "$S/sb/$(ID v1)/hostkey")" && $(cat "$BOXERY_CONF/host-keys/v1") == "v1.boxery $(cat "$S/sb/$(ID v1)/hostkey")" ]] &&
+	ok "no seeded host key; backend_platform_host_key reports the API's key for boxery-host to pin (#70)" || bad "platform key: $("$ROOT/host/backend.sh" backend_platform_host_key v1 2>&1) / $(cat "$BOXERY_CONF/host-keys/v1" 2>&1)"
 grep -F "ExecStart=$E/v1/tunnel.sh" "$(U v1)" >/dev/null && [[ -f $UNITS/enabled.boxery-boat-bxtest-v1.service && -f $UNITS/boxery-boat-bxtest-v1.service ]] && ok "tunnel: enabled, running user unit" || bad "unit"
 bash -n "$E/v1/tunnel.sh" && ok "tunnel.sh parses" || bad "tunnel.sh syntax"
 : >"$CALLS"; bash "$E/v1/tunnel.sh" && ok "tunnel connects with the pinned key" || bad "tunnel ssh refused"
@@ -225,9 +233,9 @@ done
 "$H" new v2 --cpus 8 >/dev/null 2>"$tmp/err"
 [[ $(jq -r .type "$S/sb/$(ID v2)/create.json") == large && $(cat "$E/v2/slot") == 2 ]] && grep -F "boat type large: 8 vCPU, 16384 MiB, 111 GiB" "$tmp/err" >/dev/null && ok "8 vCPU → large (logged); second VM gets slot 2" || bad "v2: $(cat "$tmp/err")"
 j=$(lsj)
-jq -e 'map(select(.name == "v1"))[0] | .state == "running" and .addr == "127.0.0.1:22601" and .disk == "51GiB"' <<<"$j" >/dev/null && ok "ls --json: running, tunnel address, disk" || bad "ls: $j"
+jq -e 'map(select(.name == "v1"))[0] | .state == "running" and .ssh_addr == "127.0.0.1:22601" and .disk_size == 51 and .disk_used == null' <<<"$j" >/dev/null && ok "ls --json: running, tunnel address, disk" || bad "ls: $j"
 jq -e 'map(select(.name == "v1"))[0] | .tunnel == "up"' <<<"$j" >/dev/null && ok "ls --json: the tunnel's state" || bad "tunnel: $j"
-e=$("$H" new hl --headless 2>&1) && bad "headless accepted" || { [[ $e == *"headless VMs (new --headless) aren't supported on boat"* ]] && ok "new --headless is refused clearly" || bad "headless: $e"; }
+e=$("$H" new hl --headless 2>&1) && bad "headless accepted" || { [[ $e == *"boat: headless is unavailable"* && $e == *"use build-base and a desktop VM on a paid plan, or another backend"* ]] && ok "new --headless is refused clearly" || bad "headless: $e"; }
 jq -e 'map(.name) | sort == ["v1", "v2"]' <<<"$j" >/dev/null && ok "ls lists boxery VMs only (not the base, builders or the account's other sandboxes)" || bad "ls names: $j"
 [[ $("$ROOT/host/backend.sh" backend_size v1 2>/dev/null) == "4 8192 51" ]] && ok "backend_size: the boat type's size" || bad "size: $("$ROOT/host/backend.sh" backend_size v1 2>&1)"
 "$H" rm v2 >/dev/null 2>&1
@@ -241,7 +249,7 @@ ip1=$(cat "$S/sb/$(ID v1)/ip")
 expect "stop" "$H" stop v1
 called "curl POST /sandboxes/$(ID v1)/stop" && [[ $(st "$(ID v1)") == archived ]] && grep -x sync "$S/sb/$(ID v1)/edge.log" >/dev/null && ok "stop syncs, stops and waits until boat has saved the disk" || bad "stop: $(cat "$CALLS")"
 [[ ! -f $UNITS/boxery-boat-bxtest-v1.service ]] && ok "stop stops the tunnel" || bad "tunnel still up"
-lsj | jq -e 'map(select(.name == "v1"))[0] | .state == "shut off" and .addr == null' >/dev/null && ok "stopped VM: shut off, no addr" || bad "ls stopped: $(lsj)"
+lsj | jq -e 'map(select(.name == "v1"))[0] | .state == "shut off" and .ssh_addr == null' >/dev/null && ok "stopped VM: shut off, no addr" || bad "ls stopped: $(lsj)"
 : >"$CALLS"
 expect "stop of a stopped VM" "$H" stop v1
 ! called "/stop" && ok "… is a no-op on boat" || bad "second stop: $(cat "$CALLS")"
@@ -253,6 +261,7 @@ expect "start of a starting VM" "$H" start v1
 ! called "/resume" && [[ $(st "$(ID v1)") == ready ]] && ok "… waits for it instead of resuming again" || bad "start while starting: $(cat "$CALLS")"
 ip2=$(cat "$S/sb/$(ID v1)/ip")
 [[ $ip2 != "$ip1" ]] && grep -F "user@$ip2" "$E/v1/tunnel.sh" >/dev/null && [[ $(cat "$E/v1/known_hosts") == "$(ID v1) $(cat "$S/sb/$(ID v1)/hostkey")" && -f $UNITS/boxery-boat-bxtest-v1.service ]] && ok "start re-pins the new machine and rewrites the tunnel" || bad "after start: $(cat "$E/v1/tunnel.sh")"
+[[ $(cat "$BOXERY_CONF/host-keys/v1") == "v1.boxery $(cat "$S/sb/$(ID v1)/hostkey")" ]] && ok "...and boxery-host's record for v1 follows the new machine's key" || bad "host-keys/v1 after start: $(cat "$BOXERY_CONF/host-keys/v1")"
 
 # --- resize: stop + resume with a new type
 : >"$CALLS"
@@ -363,7 +372,27 @@ done
 (unset BOXERY_BOAT_PREFIX; BOXERY_BOAT_DIR=$tmp/fresh; . "$ROOT/host/backends/boat.sh"; [[ -z $BOAT_PREFIX ]] && ! backend_has_base && [[ -z $(backend_list) ]]) && ok "no prefix yet: no base, nothing listed" || bad "unprefixed"
 p1=$(unset BOXERY_BOAT_PREFIX; BOXERY_BOAT_DIR=$tmp/fresh; . "$ROOT/host/backends/boat.sh"; backend_init; echo "$BOAT_PREFIX")
 [[ $p1 =~ ^bx[0-9a-f]{6}-$ ]] && ok "init generates a prefix" || bad "prefix: $p1"
-m=$( (BOXERY_BOAT_DIR=$tmp/nokey; unset BOAT_API_KEY; . "$ROOT/host/backends/boat.sh"; boat_api GET /me) 2>&1 || true)
+m=$( (BOXERY_BOAT_DIR=$tmp/nokey; unset BOAT_API_KEY; . "$ROOT/host/backends/boat.sh"; boat api GET /me) 2>&1 || true)
 [[ $m == *"no boat API key: set BOAT_API_KEY"* ]] && ok "no API key: says how to set it" || bad "no key message: $m"
+
+# --- lib/boat.mjs on its own: replies that aren't boat's, settings, the TSV (review of the Node port)
+B() { "${BOXERY_NODE:-node}" "$ROOT/host/backends/lib/boat.mjs" "$@"; }
+printf '#!/usr/bin/env bash\ncat >/dev/null; printf "%%s\\n200" "${FAKE_REPLY:-}"\n' >"$tmp/bin/curl.fake"; chmod +x "$tmp/bin/curl.fake"
+mkdir -p "$tmp/fakebin"; ln -sf "$tmp/bin/curl.fake" "$tmp/fakebin/curl"
+FB() { PATH="$tmp/fakebin:$PATH" BOAT_API_KEY=k BOXERY_BOAT_RETRIES=1 B "$@"; }
+FAKE_REPLY='<html>login</html>' FB check 2>"$tmp/err" && bad "an HTML 200 passed the key check" || { grep -F "not boat's JSON" "$tmp/err" >/dev/null && ok "a 2xx that isn't boat's JSON (a login page, a wrong API URL) is an error" || bad "html: $(cat "$tmp/err")"; }
+rc=0; FAKE_REPLY='{"ok":true}' FB has-base bxtest-base 2>/dev/null || rc=$?; [[ $rc == 2 ]] && ok "has-base: a reply without the snapshot list can't tell (2), never 'no base' (1)" || bad "has-base on a bad list"
+FAKE_REPLY='{"ok":true,"sandboxes":[{"id":"bx_x","name":"bxtest-vm-ok","state":"running\nevil\trunning"}],"pageInfo":{}}' FB list >"$tmp/list" 2>&1
+[[ $(wc -l <"$tmp/list" | tr -d ' ') == 1 && $(cut -f1,2 "$tmp/list") == "ok"$'\t'"unknown" ]] && ok "a state with a tab or newline is 'unknown', never a row of its own" || bad "tsv: $(cat -A "$tmp/list")"
+printf '#!/usr/bin/env bash\necho x >>"%s"; cat >/dev/null; printf "%%s\\n200" "${FAKE_REPLY:-}"\n' "$tmp/polls" >"$tmp/fakebin/curl"; chmod +x "$tmp/fakebin/curl"
+rc=0; out=$(BOXERY_BOAT_TRIES='' BOXERY_BOAT_POLL=0 FAKE_REPLY='{"ok":true,"sandbox":{"state":"provisioning"}}' FB wait-ready bx_x 2>&1) || rc=$?
+[[ $rc == 1 && $out == *"timed out waiting for boat sandbox bx_x"* && $(wc -l <"$tmp/polls" | tr -d ' ') == 180 ]] && ok "an empty BOXERY_BOAT_TRIES is its default (180 polls), not zero" || bad "tries: rc=$rc polls=$(wc -l <"$tmp/polls") $out"
+ln -sf "$tmp/bin/curl.fake" "$tmp/fakebin/curl"
+(BOXERY_BOAT_TTL=abc FB create vm x default) 2>"$tmp/err" && bad "BOXERY_BOAT_TTL=abc accepted" || { grep -F "BOXERY_BOAT_TTL must be a number" "$tmp/err" >/dev/null && ok "a bad BOXERY_BOAT_TTL is refused, not turned into 'no auto-stop'" || bad "ttl: $(cat "$tmp/err")"; }
+(PATH="$tmp/fakebin:$PATH" BOAT_API_KEY=k BOXERY_BOAT_RETRIES=x B check) 2>"$tmp/err" && bad "BOXERY_BOAT_RETRIES=x accepted" || { grep -F "BOXERY_BOAT_RETRIES must be a whole number" "$tmp/err" >/dev/null && ok "a malformed numeric setting is refused" || bad "retries: $(cat "$tmp/err")"; }
+# the key and the body never on a command line: curl's argv
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"; cat >/dev/null; printf "{\\"ok\\":true}\\n200"\n' "$tmp/argv.log" >"$tmp/fakebin/curl"; chmod +x "$tmp/fakebin/curl"
+PATH="$tmp/fakebin:$PATH" BOAT_API_KEY=boat_SECRETKEY B api POST /x '{"secret":"BODYSECRET"}' >/dev/null 2>&1
+! grep -e boat_SECRETKEY -e BODYSECRET "$tmp/argv.log" >/dev/null && grep -F -- "-K -" "$tmp/argv.log" >/dev/null && ok "curl gets the key and the body on stdin (-K -), never on its command line" || bad "argv: $(cat "$tmp/argv.log")"
 
 echo "passed: $pass  failed: $fail"; ((fail == 0))

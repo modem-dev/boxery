@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { discover, newer, parseArgs, parseService } from "../host/boxery-upgrade.mjs";
+/** @import { ProfileServices, Service } from "../host/boxery-upgrade.mjs" */
 
 let O, L;
 try { L = await import("../host/boxery-leases.mjs"); O = await import("../host/boxery-operations.mjs"); }
@@ -38,7 +39,7 @@ test("parseService reads systemd proxy and reaper units", () => {
 		{ kind: "proxy", root: "/srv/boxery", conf: "/home/u/.config/boxery-lima", node: "/opt/node/bin/node", path: null });
 	assert.deepEqual(parseService(reaper("/srv/boxery", "/c")),
 		{ kind: "reaper", root: "/srv/boxery", conf: "/c", node: null, path: "/opt/node/bin:/home/u/.local/bin:/usr/bin" });
-	assert.equal(parseService(unit("/srv/boxery", null)).conf, null, "older units have no BOXERY_CONF: the default profile");
+	assert.equal(/** @type {Service} */ (parseService(unit("/srv/boxery", null))).conf, null, "older units have no BOXERY_CONF: the default profile");
 	assert.equal(parseService("[Service]\nExecStart=/usr/bin/socat VSOCK-LISTEN:8088,fork TCP:127.0.0.1:8088\n"), null, "the vsock bridge isn't a profile service");
 	assert.equal(parseService("[Service]\nExecStart=/usr/bin/something-else\n"), null);
 });
@@ -62,8 +63,8 @@ test("discover groups this install's services by profile and reports other insta
 		];
 		const { profiles, others } = discover(mine, files);
 		assert.deepEqual([...profiles.keys()].sort(), ["/c/one", "/c/two"]);
-		assert.equal(profiles.get("/c/one").reaper.kind, "reaper");
-		assert.equal(profiles.get("/c/two").reaper, undefined);
+		assert.equal(/** @type {{ reaper: Service }} */ (profiles.get("/c/one")).reaper.kind, "reaper");
+		assert.equal(/** @type {ProfileServices} */ (profiles.get("/c/two")).reaper, undefined);
 		assert.deepEqual(others.map((o) => o.root), [other]);
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -119,5 +120,29 @@ sqlite("a dead upgrader's lock is reclaimed by the next operation", async () => 
 		const held = await O.holdExclusive(dir, Date.now() + 2000);
 		assert.ok(held, "reclaimed (no intents to replay)");
 		held.release();
+	} finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+sqlite("the pre-upgrade copy leaves out the upgrade's own lock; restoring it keeps the lock held", async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "boxery-upgrade-copy-"));
+	const db = L.open(path.join(dir, "leases.db"));
+	const locks = (d) => d.prepare("SELECT resource FROM operation_locks").all().map((r) => r.resource);
+	try {
+		L.add(db, "p1");
+		const held = await O.holdExclusive(dir, Date.now() + 2000);
+		const copy = path.join(dir, "copy.db");
+		held.snapshot(copy);
+		const c = L.open(copy);
+		assert.deepEqual([locks(c), c.prepare("SELECT count(*) n FROM operations").get().n], [[], 0], "restored by hand, the copy is an idle host");
+		c.close();
+		db.exec(`CREATE TABLE extras (x); PRAGMA user_version = ${L.SCHEMA_VERSION + 1}`); // the new code migrates
+		L.remove(db, "p1");
+		held.restore(copy);
+		assert.equal(L.schemaVersion(db), L.SCHEMA_VERSION);
+		assert.equal(L.get(db, "p1").state, "FREE");
+		assert.deepEqual(locks(db), ["*"], "still held until released");
+		assert.equal(await O.holdExclusive(dir, Date.now() + 200), null, "so nothing else gets in");
+		held.release();
+		assert.deepEqual(locks(db), []);
 	} finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

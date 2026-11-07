@@ -1,0 +1,99 @@
+// CLI ↔ agent-tool parity. Agents get the vm_* tools (core/boxery-tools.mjs, shared by MCP and pi);
+// people and scripts get controller/boxery. Each side must account for the other: a new tool or
+// action fails here until it names its CLI command (or says why there is none), and so does a new
+// CLI command. Where both exist, prefer one implementation (boxery cp runs vm_copy's own code).
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { TOOLS } from "../core/boxery-tools.mjs";
+
+class NoCli { constructor(why) { this.why = why; } }
+const none = (why) => new NoCli(why);
+const DESKTOP = none("people drive the desktop and Chrome themselves: boxery desktop NAME");
+const NO_CURRENT = none("the CLI has no current VM; every command names its VM");
+
+// tool → CLI command, or {action: CLI command} for tools with an `action` enum.
+const CLI_FOR_TOOL = {
+	vm_bash: "run",
+	vm_jobs: { start: "run --bg", list: "jobs", logs: "logs", wait: "wait", kill: "kill" },
+	vm_read: "run", // boxery run NAME cat PATH, or boxery cp NAME:PATH ./
+	vm_write: "cp",
+	vm_edit: none("people edit in their editor, over boxery ssh or after boxery cp"),
+	vm_copy: "cp",
+	vm_screenshot: DESKTOP,
+	vm_click: DESKTOP,
+	vm_type: DESKTOP,
+	vm_key: DESKTOP,
+	vm_scroll: DESKTOP,
+	vm_browser: DESKTOP,
+	vm_manage: {
+		new: "new", fork: "fork", rm: "rm", start: "start", stop: "stop", resize: "resize",
+		snap: "snap", "snap-rm": "snap-rm", revert: "revert", use: NO_CURRENT, none: NO_CURRENT, "build-base": "build-base",
+		host: none("the CLI has no session host; every command takes --host, and the default is the user's (boxery host use)"),
+		host_add: "host add", host_rm: "host rm",
+	},
+	vm_info: { list: "ls", shapes: "shapes", grants: "grants", snaps: "snaps", images: "images", version: "version", hosts: "host ls", capabilities: "capabilities" },
+	vm_lease: { acquire: "acquire", renew: "renew", release: "release", list: "leases" },
+	vm_grant: "grant", // the agent asks; the user approves in a prompt, then it runs boxery grant
+};
+
+// CLI commands no tool maps to, and why agents don't get them.
+const CLI_ONLY = {
+	help: "usage text",
+	setup: "configuring the VM host is the user's setup",
+	backends: "catalog for user setup; agents inspect their configured host with vm_info capabilities",
+	backend: "refreshes the backend recorded in the user's profile (vm_info hosts reads that record)",
+	"upgrade-host": "upgrading the host is the user's to run (vm_info version tells agents to ask)",
+	revoke: "only the user takes access away (agents can only ask for it, with vm_grant)",
+	"agent-forward": "only the user changes what a VM may access",
+	ssh: "interactive shell (agents use vm_bash)",
+	attach: "interactive tmux session",
+	desktop: "opens noVNC in the user's browser (agents use the computer-use tools)",
+	forward: "binds a port on the user's machine",
+	prompt: "starts a pi task in the VM; agents run commands with vm_jobs",
+	sessions: "lists the tmux sessions behind attach/prompt",
+	"proxy-log": "host-wide LLM/edge request log, for the user",
+	pool: "host admin",
+	runners: "host admin: GitHub Actions runners on the pool, with a GitHub token that stays on the host",
+	pin: "which ssh host key a VM is trusted with is the user's decision (--from-guest trusts the network once)",
+	patch: "rewrites a VM's software and may restart it under running agents; the user's to run (vm_info list shows outdated VMs)",
+};
+
+// controller/cli.mjs's command table, plus what it handles before selecting a host (help, host, setup).
+const { COMMANDS, PRE_HOST } = await import("../controller/cli.mjs");
+const ALIASES = new Set(["list"]); // ls's other name
+function cliCommands() {
+	return new Set([...Object.keys(COMMANDS).filter((c) => !ALIASES.has(c)), ...PRE_HOST]);
+}
+
+const mapped = () =>
+	TOOLS.flatMap((t) => {
+		const v = CLI_FOR_TOOL[t.name];
+		if (typeof v === "object" && !(v instanceof NoCli)) return Object.entries(v).map(([action, cli]) => [`${t.name} ${action}`, cli]);
+		return [[t.name, v]];
+	});
+
+test("every vm_* tool and action names its CLI command, or why it has none", () => {
+	for (const t of TOOLS) {
+		assert.ok(t.name in CLI_FOR_TOOL, `${t.name} is new: add it to CLI_FOR_TOOL in test/parity.test.mjs with its boxery command, or none("why")`);
+		const actions = t.parameters.properties.action?.enum;
+		const v = CLI_FOR_TOOL[t.name];
+		if (actions && !(v instanceof NoCli)) {
+			assert.ok(typeof v === "object", `${t.name} has actions: map each one`);
+			assert.deepEqual(Object.keys(v).sort(), [...actions].sort(), `${t.name}: map exactly its actions (${actions.join(", ")})`);
+		}
+	}
+	assert.deepEqual(Object.keys(CLI_FOR_TOOL).filter((n) => !TOOLS.some((t) => t.name === n)), [], "CLI_FOR_TOOL lists tools that no longer exist");
+	for (const [tool, cli] of mapped()) {
+		if (cli instanceof NoCli) assert.ok(cli.why.length > 10, `${tool}: say why there is no CLI command`);
+		else assert.ok(cliCommands().has(cli.split(" ")[0]), `${tool} maps to "boxery ${cli}", which controller/boxery doesn't dispatch`);
+	}
+});
+
+test("every CLI command maps to a vm_* tool or says why agents don't get it", () => {
+	const reached = new Set(mapped().flatMap(([, cli]) => (cli instanceof NoCli ? [] : [cli.split(" ")[0]])));
+	for (const c of cliCommands()) {
+		assert.ok(reached.has(c) || c in CLI_ONLY, `boxery ${c} is new: map a vm_* tool to it in CLI_FOR_TOOL, or add it to CLI_ONLY with a reason`);
+		assert.ok(!(reached.has(c) && c in CLI_ONLY), `boxery ${c} is mapped to a tool and listed in CLI_ONLY`);
+	}
+	for (const c of Object.keys(CLI_ONLY)) assert.ok(cliCommands().has(c), `CLI_ONLY lists boxery ${c}, which controller/boxery doesn't dispatch`);
+});

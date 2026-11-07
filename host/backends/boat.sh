@@ -2,8 +2,9 @@
 # boxery backend: boat.dev (https://boat.dev). Sourced by host/boxery-host. EXPERIMENTAL.
 # Contract: see host/backends/README.md ("Remote backends" for the shared tunnel model, lib/remote.sh).
 #
-# - VMs are boat sandboxes (full Ubuntu 24.04 VMs), managed through boat's REST API with curl and an API
-#   key (BOAT_API_KEY, saved by init in $BOAT_DIR/api-key). No KVM on the host, so it runs on macOS too.
+# - VMs are boat sandboxes (full Ubuntu 24.04 VMs), managed through boat's REST API (lib/boat.mjs: requests,
+#   JSON, polling; curl underneath) and an API key (BOAT_API_KEY, saved by init in $BOAT_DIR/api-key). No KVM
+#   on the host, so it runs on macOS too. This file keeps the backend contract, ssh and the tunnels.
 # - Sandboxes are named PREFIXvm-NAME (VMs) and PREFIXbuild (the builder). PREFIX (default "bx<6 hex>-",
 #   generated once into $BOAT_DIR/prefix) keeps the account's other sandboxes out of reach. Names, not
 #   labels: boat drops the labels of a sandbox created from a saved snapshot.
@@ -31,7 +32,7 @@
 BOAT_DIR=${BOXERY_BOAT_DIR:-$HOME/.local/share/boxery/boat}
 BOAT_PREFIX=${BOXERY_BOAT_PREFIX:-$(cat "$BOAT_DIR/prefix" 2>/dev/null || true)}
 BOAT_API=${BOXERY_BOAT_API:-https://boat.dev/api/v1}
-BOAT_ORG=${BOXERY_BOAT_ORG:-}                      # bill an organization (X-Boat-Org); default: the active wallet
+# BOXERY_BOAT_ORG: bill an organization (X-Boat-Org); default: the active wallet (read by lib/boat.mjs)
 BOAT_PORT_BASE=${BOXERY_BOAT_PORT_BASE:-22600}     # VM slot S ↔ host port BASE+S (the tunnel's -L end)
 BOAT_GUEST_PORT=${BOXERY_BOAT_GUEST_PORT:-18088}   # the tunnel's -R end in the guest (LLM proxy)
 BOAT_MAX_TYPE=${BOXERY_BOAT_MAX_TYPE:-large}       # xlarge needs the $100 plan
@@ -39,7 +40,7 @@ BOAT_TTL=${BOXERY_BOAT_TTL:-}                      # seconds until boat auto-sto
 BOAT_TUNNEL_WAIT=${BOXERY_BOAT_TUNNEL_WAIT:-120}   # seconds new/start/revert wait for a tunnel to connect
 BOAT_SUPERVISOR=${BOXERY_BOAT_SUPERVISOR:-$([[ $(uname) == Darwin ]] && echo launchd || echo systemd)}
 BOAT_POLL=${BOXERY_BOAT_POLL:-5}                   # seconds between state polls
-BOAT_TRIES=${BOXERY_BOAT_TRIES:-180}               # polls before giving up (sandbox start, stop, saves)
+# BOXERY_BOAT_TRIES (180): polls before giving up on a sandbox start, stop or save (read by lib/boat.mjs)
 BOAT_KEY=$BOAT_DIR/id_ed25519                      # the host's admin key for `user` in every sandbox
 BOAT_MAX_SLOT=500
 # Never forward the host's agent or X11 into a guest, whatever ~/.ssh/config says. Host keys come from
@@ -48,7 +49,7 @@ BOAT_SSH=(ssh -a -x -o ForwardAgent=no -o ForwardX11=no -o BatchMode=yes -o Conn
 	-o ServerAliveCountMax=4 -o StrictHostKeyChecking=yes -o ControlMaster=no -o ControlPath=none -o LogLevel=ERROR
 	-o IdentitiesOnly=yes -i "$BOAT_KEY")
 # Pin effective settings in operation journals, so crash recovery acts on the same account and names.
-export BOXERY_BOAT_DIR=$BOAT_DIR BOXERY_BOAT_API=$BOAT_API BOXERY_BOAT_PORT_BASE=$BOAT_PORT_BASE BOXERY_BOAT_GUEST_PORT=$BOAT_GUEST_PORT
+export BOXERY_BOAT_DIR=$BOAT_DIR BOXERY_BOAT_API=$BOAT_API BOXERY_BOAT_PORT_BASE=$BOAT_PORT_BASE BOXERY_BOAT_GUEST_PORT=$BOAT_GUEST_PORT BOXERY_BOAT_POLL=$BOAT_POLL
 [[ -z $BOAT_PREFIX ]] || export BOXERY_BOAT_PREFIX=$BOAT_PREFIX
 # shellcheck source=lib/remote.sh
 . "$ROOT/host/backends/lib/remote.sh"
@@ -76,92 +77,15 @@ boat_base() { echo "${BOAT_PREFIX}base"; }   # the base: a saved snapshot
 # $BOAT_DIR/images/SNAPSHOT ("IMAGE<TAB>DISK_GIB").
 boat_img() { local h; h=$(printf '%s' "$1" | { shasum 2>/dev/null || sha1sum; } | cut -c1-16); echo "${BOAT_PREFIX}i-$h"; }
 
-# ---------------------------------------------------------------- the boat API
-boat_api_key() {
-	if [[ -n ${BOAT_API_KEY:-} ]]; then echo "$BOAT_API_KEY"; return; fi
-	[[ -s $BOAT_DIR/api-key ]] || { echo "boxery-host: no boat API key: set BOAT_API_KEY and run boxery-host init --backend boat" >&2; return 1; }
-	cat "$BOAT_DIR/api-key"
-}
-# METHOD PATH [JSON_BODY [HEADER]] → the reply's JSON. Fails (with boat's message) on HTTP ≥ 400 or
-# {"ok": false}. The key goes through a curl config on a pipe, never the command line. Retries what boat
-# says is safe to retry: 429 rate_limited and 503 (nothing was created), and 5xx on GET/DELETE.
-boat_api() {
-	local m=$1 path=$2 body=${3:-} hdr=${4:-} key out code msg try=0 args
-	key=$(boat_api_key) || return 1
-	args=(-sS --max-time 120 -X "$m" -H 'Accept: application/json' -w '\n%{http_code}')
-	[[ -z $BOAT_ORG ]] || args+=(-H "X-Boat-Org: $BOAT_ORG")
-	[[ -z $hdr ]] || args+=(-H "$hdr")
-	[[ -z $body ]] || args+=(-H 'Content-Type: application/json' --data-binary @-)
-	while :; do
-		out=$(printf '%s' "$body" | curl "${args[@]}" -K <(printf 'header = "Authorization: Bearer %s"\n' "$key") "$BOAT_API$path" 2>&1) || out=$'\n000'
-		code=${out##*$'\n'}; out=${out%$'\n'*}
-		if [[ $code =~ ^2[0-9][0-9]$ ]] && ! jq -e 'type == "object" and .ok == false' <<<"$out" >/dev/null 2>&1; then
-			printf '%s\n' "$out"; return 0
-		fi
-		msg=$(jq -r '"\(.code // .error.code // "error"): \(.message // .error.message // "")"' <<<"$out" 2>/dev/null) || msg=${out:0:300}
-		try=$((try + 1))
-		if ((try < ${BOXERY_BOAT_RETRIES:-5})); then
-			case $code:$m:$msg in
-			429:*:rate_limited* | 429:*:IP_RATE_LIMIT* | 503:* | 5[0-9][0-9]:GET:* | 5[0-9][0-9]:DELETE:* | 000:GET:*) sleep $((try * 2)); continue ;;
-			esac
-		fi
-		echo "boxery-host: boat $m $path: HTTP $code $msg" >&2
-		return 1
-	done
-}
-# Every sandbox of this host (all states, every page) as one JSON array. An unreachable API is an
-# error, never an empty account.
-boat_sandboxes() {
-	local cursor="" page all='[]' q
-	while :; do
-		q="/sandboxes?namePrefix=${BOAT_PREFIX}&state=init,provisioning,provisioned,cloning,ready,idle,running,archiving,archived,error&limit=200"
-		[[ -z $cursor ]] || q="$q&cursor=$cursor"
-		page=$(boat_api GET "$q") || return 1
-		jq -e '.sandboxes | type == "array"' <<<"$page" >/dev/null 2>&1 || { echo "boxery-host: unexpected GET /sandboxes reply from boat: ${page:0:200}" >&2; return 1; }
-		# The name filter is the API's; check it again here: only this host's sandboxes are ever touched.
-		all=$(jq -c --argjson a "$all" --arg p "$BOAT_PREFIX" '$a + [.sandboxes[] | select(.name | type == "string" and startswith($p))]' <<<"$page")
-		cursor=$(jq -r '.pageInfo.nextCursor // empty | select(test("^[A-Za-z0-9._~=-]+$"))' <<<"$page")
-		[[ -n $cursor ]] || break
-	done
-	printf '%s\n' "$all"
-}
-boat_vm_ids() { jq -r --arg n "${BOAT_PREFIX}vm-$1" '.[] | select(.name == $n) | .id' <<<"$2"; }   # NAME SANDBOXES
-boat_state_of() { jq -r --arg i "$1" '.[] | select(.id == $i) | .state' <<<"$2"; }                                                 # ID SANDBOXES
-boat_get() { boat_api GET "/sandboxes/$1" | jq -c '.sandbox // .'; }
-boat_delete() { boat_api DELETE "/sandboxes/$1" "" "X-Ascii-Confirm-Delete: $1" >/dev/null; }
-boat_saved() { boat_api GET "/saved-snapshots" | jq -c '.snapshots // []'; }
-boat_saved_status() { jq -r --arg n "$1" '.[] | select(.name == $n) | .status' <<<"$2"; }   # NAME SAVED
-# Poll a sandbox until it runs commands (ready, idle, running). Fails on error, or when it stops.
-boat_wait_ready() { # ID
-	local i st
-	for ((i = 1; i <= BOAT_TRIES; i++)); do
-		st=$(boat_get "$1" | jq -r '.state') || st=""
-		case $st in ready | idle | running) return 0 ;; error | archived) echo "boxery-host: boat sandbox $1 is $st" >&2; return 1 ;; esac
-		sleep "$BOAT_POLL"
-	done
-	echo "boxery-host: timed out waiting for boat sandbox $1 to start" >&2; return 1
-}
-boat_wait_stopped() { # ID
-	local i st
-	for ((i = 1; i <= BOAT_TRIES; i++)); do
-		st=$(boat_get "$1" | jq -r '.state') || st=""
-		[[ $st == archived ]] && return 0
-		sleep "$BOAT_POLL"
-	done
-	echo "boxery-host: timed out waiting for boat sandbox $1 to stop" >&2; return 1
-}
-# Save sandbox ID as saved snapshot NAME and wait until it's ready. A failed save is removed.
-boat_save() { # ID NAME
-	local i st
-	boat_api POST /saved-snapshots "$(jq -nc --arg s "$1" --arg n "$2" '{sandboxId: $s, name: $n}')" >/dev/null || return 1
-	for ((i = 1; i <= BOAT_TRIES; i++)); do
-		st=$(boat_api GET "/saved-snapshots/$2" | jq -r '.snapshot.status // .status') || st=""
-		case $st in ready) return 0 ;; failed) break ;; esac
-		sleep "$BOAT_POLL"
-	done
-	boat_api DELETE "/saved-snapshots/$2" >/dev/null 2>&1 || true
-	echo "boxery-host: saving snapshot $2 failed (${st:-timed out})" >&2; return 1
-}
+# ---------------------------------------------------------------- the boat API (lib/boat.mjs)
+boat() { "${BOXERY_NODE:-node}" "$ROOT/host/backends/lib/boat.mjs" "$@"; }
+boat_vm_ids() { boat vm-ids "$1"; }               # NAME → its sandbox ids (every generation)
+boat_state() { boat state "$1"; }                 # ID → boat's state
+boat_delete() { boat delete "$1"; }
+boat_wait_ready() { boat wait-ready "$1"; }       # until it runs commands; fails on error or a stop
+boat_wait_stopped() { boat wait-stopped "$1"; }
+boat_save() { boat save "$1" "$2"; }               # ID NAME: a saved snapshot, ready (a failed save is removed)
+boat_saved_status() { boat saved-status "$1"; }    # NAME → ready, saving, failed, or nothing
 
 # ---------------------------------------------------------------- sizes: boat's fixed types
 boat_types() { printf 'small 2 4096 51\ndefault 4 8192 51\nlarge 8 16384 111\nxlarge 16 32768 251\n'; }   # TYPE CPUS MEM_MIB DISK_GIB
@@ -183,18 +107,7 @@ boat_type_for() {
 # ---------------------------------------------------------------- ssh
 # Authorize the host's key on sandbox ID (running) and pin its address and host key in DIR: dest
 # ("HOST PORT USER") and known_hosts. Every resume, fork and new sandbox has a new machine.
-boat_ssh_setup() { # DIR ID
-	local r h p u k
-	r=$(boat_api POST "/sandboxes/$2/sshkey" "$(jq -nc --arg k "$(cat "$BOAT_KEY.pub")" '{key: $k}')") || return 1
-	# Only plain values: these become ssh arguments and a known_hosts line.
-	read -r h p u k < <(jq -r 'def plain: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9.:_-]*$");
-		(if (.sshEndpoint | plain) then (.sshEndpoint | capture("^(?<h>.+):(?<p>[0-9]{1,5})$") // {h: "", p: ""}) else {h: (.machineIp // ""), p: "22"} end) as $e |
-		[(if ($e.h | plain) then $e.h else "-" end), $e.p, (if (.sshUser | plain) then .sshUser else "user" end),
-		 (.hostKey // "" | select(test("^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) [A-Za-z0-9+/=]+$")) // "-" | sub(" "; "_"))] | @tsv' <<<"$r")
-	[[ $h != - && $p =~ ^[0-9]+$ && -n $k && $k != - ]] || { echo "boxery-host: boat sshkey for $2: no usable address or host key: ${r:0:200}" >&2; return 1; }
-	echo "$2 ${k/_/ }" >"$1/known_hosts"
-	echo "$h $p $u" >"$1/dest"
-}
+boat_ssh_setup() { boat sshkey "$1" "$2" "$BOAT_KEY.pub"; }   # DIR ID: authorize, pin (dest, known_hosts)
 boat_ssh_args() { # DIR → ssh arguments for the sandbox recorded in DIR
 	local h p u; read -r h p u <"$1/dest" || return 1
 	printf '%s\n' -o "HostKeyAlias=$(cat "$1/id")" -o "UserKnownHostsFile=$1/known_hosts" -p "$p" "$u@$h"
@@ -206,12 +119,20 @@ boat_run() { # DIR COMMAND
 	"${BOAT_SSH[@]}" "${a[@]}" "${@:2}"
 }
 boat_wait_ssh() { # DIR
-	local i; for i in $(seq 60); do boat_run "$1" true </dev/null >/dev/null 2>&1 && return 0; sleep 2; done
+	local _; for _ in $(seq 60); do boat_run "$1" true </dev/null >/dev/null 2>&1 && return 0; sleep 2; done
 	echo "boxery-host: no ssh to boat sandbox $(cat "$1/id")" >&2; return 1
 }
 # A sandbox that just started: wait for it, authorize and pin, wait for ssh.
 boat_attach() { boat_wait_ready "$2" && boat_ssh_setup "$1" "$2" && boat_wait_ssh "$1"; }   # DIR ID
 boat_sync() { boat_run "$1" 'sync' </dev/null >/dev/null 2>&1; }   # DIR
+# The VM's ssh host key as boat's API reported it at the last attach (new, start, reimage). It is the
+# machine's own sshd, which the tunnel's -L end also reaches, so boxery-host pins it for NAME
+# (host/hostkeys.mjs) instead of seeding a key of its own: every resume puts the VM on a new machine.
+backend_platform_host_key() { # NAME
+	local kh; kh=$(boat_dir "$1")/known_hosts
+	[[ -f $kh ]] || return 1
+	awk '{ print $2, $3; exit }' "$kh"
+}
 
 boat_tunnel_write() { # NAME
 	local d a=() l; d=$(boat_dir "$1")
@@ -223,14 +144,13 @@ boat_tunnel_write() { # NAME
 
 # ---------------------------------------------------------------- setup
 backend_check() {
-	need curl; need jq; need ssh; need ssh-keygen; need nc; need node; need openssl
+	need curl; need ssh; need ssh-keygen; need nc; need "${BOXERY_NODE:-node}"; need openssl
 	mkdir -p "$BOAT_DIR"
 	if [[ $BOAT_SUPERVISOR == launchd ]]; then need launchctl; else need systemctl; fi
 	[[ -z $BOAT_PREFIX || $BOAT_PREFIX =~ ^[a-z][a-z0-9-]{0,19}$ ]] || die "BOXERY_BOAT_PREFIX must match [a-z][a-z0-9-]{0,19}"
 	boat_type_size "$BOAT_MAX_TYPE" | grep . >/dev/null || die "BOXERY_BOAT_MAX_TYPE must be small, default, large or xlarge"
 	[[ -z $BOAT_TTL || $BOAT_TTL =~ ^[1-9][0-9]{0,6}$ ]] || die "BOXERY_BOAT_TTL must be a number of seconds (or empty: no auto-stop)"
-	local out; out=$(boat_api GET /me) || die "boat.dev refused the API key (BOAT_API_KEY, or $BOAT_DIR/api-key)"
-	jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1 || die "unexpected GET /me reply from boat: ${out:0:200}"
+	boat check || die "boat.dev refused the API key (BOAT_API_KEY, or $BOAT_DIR/api-key)"
 }
 backend_init() {
 	mkdir -p "$BOAT_DIR/vms" "$BOAT_DIR/images"; chmod 700 "$BOAT_DIR"
@@ -268,28 +188,16 @@ boat_build_post() {
 	echo 'sync'
 }
 
-boat_ttl() { if [[ -n $BOAT_TTL ]]; then echo "$BOAT_TTL"; else echo null; fi; }   # → ttlSeconds
-# POST /sandboxes as a boxery sandbox: named, no auto-stop (BOXERY_BOAT_TTL), no account environment. The
-# labels are informational (boat keeps them only on sandboxes not created from a saved snapshot).
-boat_create() { # ROLE NAME TYPE [FROM] → the new sandbox's id
-	local body r id
-	body=$(jq -nc --arg p "$BOAT_PREFIX" --arg r "$1" --arg n "$2" --arg t "$3" --arg f "${4:-}" --argjson ttl "$(boat_ttl)" '{type: $t, ttlSeconds: $ttl, noEnv: true,
-		name: (if $r == "vm" then "\($p)vm-\($n)" else "\($p)\($r)" end), labels: ({"boxery.host": $p, "boxery.role": $r} + (if $r == "vm" then {"boxery.vm": $n} else {} end))}
-		+ (if $f != "" then {from: $f} else {} end)')
-	r=$(boat_api POST /sandboxes "$body" "Idempotency-Key: boxery-$(openssl rand -hex 16)") || return 1
-	id=$(jq -r '.sandbox.id // .id // empty | select(test("^bx_[A-Za-z0-9]+$"))' <<<"$r")
-	[[ -n $id ]] || { echo "boxery-host: unexpected POST /sandboxes reply from boat: ${r:0:200}" >&2; return 1; }
-	echo "$id"
-}
+boat_create() { boat create "$@"; }   # ROLE NAME TYPE [FROM] → the new sandbox's id (named, no auto-stop, noEnv)
 
 # The build poller's runner: if ssh fails (boat moved the builder, or its host key changed), re-pin once.
 boat_build_run() { boat_run "$@" || { boat_ssh_setup "$1" "$(cat "$1/id")" >/dev/null 2>&1 && boat_run "$@"; }; }   # DIR COMMAND
 
 backend_build_base() {
 	boat_prefix_ensure
-	local base d id j old st tmp; base=$(boat_base); d=$BOAT_DIR/build
-	j=$(boat_sandboxes) || exit 1
-	for old in $(jq -r --arg n "${BOAT_PREFIX}build" '.[] | select(.name == $n) | .id' <<<"$j"); do boat_delete "$old" || die "could not remove a previous builder sandbox $old"; done
+	local base d id old st tmp; base=$(boat_base); d=$BOAT_DIR/build
+	old=$(boat ids-named "${BOAT_PREFIX}build") || exit 1
+	for old in $old; do boat_delete "$old" || die "could not remove a previous builder sandbox $old"; done
 	rm -rf "$d"; mkdir -p "$d"
 	log "creating a boat builder sandbox (type default)"
 	id=$(boat_create build build default) || die "boat: creating the builder failed"
@@ -317,18 +225,14 @@ backend_build_base() {
 	log "base image ready: boat saved snapshot $base"
 }
 
-backend_has_base() {
-	[[ -n $BOAT_PREFIX ]] || return 1
-	local s; s=$(boat_saved) || exit 1
-	[[ $(boat_saved_status "$(boat_base)" "$s") == ready ]]
-}
+backend_has_base() { [[ -n $BOAT_PREFIX ]] || return 1; boat has-base "$(boat_base)"; }   # 2: couldn't tell
 # Local state first (no API call); a VM that only exists on boat (crash before its state dir) still
 # counts, so `rm` can clean it up.
 backend_exists() {
 	[[ -d $(boat_dir "$1") ]] && return 0
 	[[ -n $BOAT_PREFIX ]] || return 1
-	local j; j=$(boat_sandboxes) || exit 1
-	[[ -n $(boat_vm_ids "$1" "$j") ]]
+	local ids; ids=$(boat_vm_ids "$1") || exit 1
+	[[ -n $ids ]]
 }
 
 # Per-VM identity, as root over ssh (lib/remote.sh). boat gives every machine its own ssh host keys and
@@ -336,7 +240,7 @@ backend_exists() {
 boat_identity_script() { remote_identity_script "$1" "$2" /usr/local/sbin/boxery-boat-boot.sh keep; }   # USERDATA NAME
 
 backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL image]
-	local name=$1 userdata=$5 from=${6:-} d src j type slot id
+	local name=$1 userdata=$5 from=${6:-} d src ids type slot id
 	[[ -n $BOAT_PREFIX ]] || die "no boat prefix; run: boxery-host init --backend boat"
 	[[ $from != stock ]] || die "headless VMs (new --headless) aren't supported on boat yet; run boxery-host build-base and create a desktop VM"
 	d=$(boat_dir "$name")
@@ -345,8 +249,8 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 	else
 		src=$(boat_base)
 	fi
-	j=$(boat_sandboxes) || exit 1
-	[[ -z $(boat_vm_ids "$name" "$j") ]] || die "$name already exists on boat ($(boat_vm_ids "$name" "$j" | head -1))"
+	ids=$(boat_vm_ids "$name") || exit 1
+	[[ -z $ids ]] || die "$name already exists on boat (${ids%%$'\n'*})"
 	type=$(boat_type_for "$2" "$3" "$4")
 	mkdir -p "$BOAT_DIR/vms"
 	mkdir "$d" || die "$name already exists"
@@ -363,21 +267,17 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 	remote_tunnel_start "$name"
 }
 
-backend_list() { # → lines: NAME<TAB>STATE<TAB>ADDR<TAB>DISK<TAB>TUNNEL
+backend_list() { # → lines: NAME<TAB>STATE<TAB>SSH<TAB>DISK_BYTES<TAB>DISK_USED_BYTES<TAB>TUNNEL
 	[[ -n $BOAT_PREFIX ]] || return 0
-	local j n st id addr disk tun
-	j=$(boat_sandboxes) || exit 1
-	jq -r --arg re "^${BOAT_PREFIX}vm-(?<n>.+)$" '.[] | (.name | capture($re)) as $m | select($m) | [$m.n, .state, .id] | @tsv' <<<"$j" |
-		while IFS=$'\t' read -r n st id; do
-			[[ $n =~ ^[a-z][a-z0-9-]*$ ]] || continue
-			[[ ! -f $(boat_dir "$n")/id || $(boat_id "$n") == "$id" ]] || continue   # a reimage's leftover sandbox
-			addr="" disk="" tun=""
-			[[ ! -f $(boat_dir "$n")/size ]] || disk="$(awk '{print $3}' "$(boat_dir "$n")/size")GiB"
-			[[ ! -f $(boat_dir "$n")/slot ]] || tun=$(remote_tunnel_state "$n")
-			case $st in ready | idle | running) st=running ;; archived) st="shut off" ;; archiving) st=stopping ;; init | provision* | cloning) st=starting ;; esac
-			if [[ $st == running && $tun == up ]]; then addr="127.0.0.1:$(remote_port "$n")"; fi
-			printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$st" "$addr" "$disk" "$tun"
-		done
+	local rows n st disk tun addr
+	rows=$(boat list) || exit 1   # NAME STATE DISK_BYTES (boat doesn't report usage: DISK_USED stays unknown)
+	while IFS=$'\t' read -r n st disk; do
+		[[ -n $n && $n =~ ^[a-z][a-z0-9-]*$ ]] || continue
+		addr="" tun=""
+		[[ ! -f $(boat_dir "$n")/slot ]] || tun=$(remote_tunnel_state "$n")
+		if [[ $st == running && $tun == up ]]; then addr="127.0.0.1:$(remote_port "$n")"; fi
+		printf '%s\t%s\t%s\t%s\t\t%s\n' "$n" "$st" "$addr" "$disk" "$tun"
+	done <<<"$rows"
 }
 
 backend_endpoint_problem() { remote_endpoint_problem "$1"; }   # README: local checks only
@@ -388,14 +288,13 @@ backend_wait_endpoint() { remote_wait_endpoint "$1"; }
 # it was stopped (resize) is applied by the resume.
 backend_start() {
 	backend_exists "$1" || die "no such vm: $1"
-	local d id st body; d=$(boat_dir "$1"); id=$(boat_id "$1")
-	st=$(boat_get "$id" | jq -r '.state') || die "cannot read $1 ($id) from boat"
+	local d id st; d=$(boat_dir "$1"); id=$(boat_id "$1")
+	st=$(boat_state "$id") || die "cannot read $1 ($id) from boat"
 	case $st in
 	ready | idle | running | init | provision* | cloning) ;;   # running, or on its way: boat_attach waits
 	*)
 		[[ $st != archiving ]] || boat_wait_stopped "$id" || die "$1 is still stopping"
-		body=$(jq -nc --arg t "$(cat "$d/type.pending" 2>/dev/null)" --argjson ttl "$(boat_ttl)" '{ttlSeconds: $ttl} + (if $t != "" then {type: $t} else {} end)')
-		boat_api POST "/sandboxes/$id/resume" "$body" >/dev/null || die "boat: resuming $1 ($id) failed"
+		boat resume "$id" "$(cat "$d/type.pending" 2>/dev/null)" || die "boat: resuming $1 ($id) failed"
 		[[ ! -f $d/type.pending ]] || mv "$d/type.pending" "$d/type"
 		;;
 	esac
@@ -410,11 +309,11 @@ backend_stop() {
 	backend_exists "$1" || die "no such vm: $1"
 	local d id st; d=$(boat_dir "$1"); id=$(boat_id "$1")
 	remote_tunnel_stop "$1"
-	st=$(boat_get "$id" | jq -r '.state') || die "cannot read $1 ($id) from boat"
+	st=$(boat_state "$id") || die "cannot read $1 ($id) from boat"
 	[[ $st != archived ]] || return 0
 	if [[ $st != archiving ]]; then
 		boat_sync "$d" || log "warning: couldn't reach $1 to flush it before stopping"
-		boat_api POST "/sandboxes/$id/stop" '{}' >/dev/null || die "boat: stopping $1 ($id) failed"
+		boat stop "$id" || die "boat: stopping $1 ($id) failed"
 	fi
 	boat_wait_stopped "$id" || die "$1 ($id) did not finish stopping"
 	log "note: boat keeps a stopped VM's disk for 14 days; snapshot it (boxery snap) to keep it longer"
@@ -434,14 +333,14 @@ backend_resize() { # NAME CPUS MEM_MIB DISK_GIB (empty = unchanged)
 	type=$(boat_type_for "${2:-$c}" "${3:-$m}" "${4:-0}")
 	cur=$(cat "$d/type.pending" 2>/dev/null || cat "$d/type")
 	[[ $type != "$cur" ]] || { log "$1 is already a boat $type"; return 0; }
-	st=$(boat_get "$id" | jq -r '.state') || die "cannot read $1 ($id) from boat"
+	st=$(boat_state "$id") || die "cannot read $1 ($id) from boat"
 	echo "$(boat_type_size "$type")" >"$d/size"
 	if [[ $st == archived ]]; then echo "$type" >"$d/type.pending"; return 0; fi
 	log "stopping $1 to move it to a boat $type"
 	remote_tunnel_stop "$1"
 	boat_sync "$d" || true
-	boat_api POST "/sandboxes/$id/stop" '{}' >/dev/null && boat_wait_stopped "$id" || { backend_start "$1"; die "could not stop $1 to resize it"; }
-	if boat_api POST "/sandboxes/$id/resume" "$(jq -nc --arg t "$type" --argjson ttl "$(boat_ttl)" '{type: $t, ttlSeconds: $ttl}')" >/dev/null; then
+	boat stop "$id" && boat_wait_stopped "$id" || { backend_start "$1"; die "could not stop $1 to resize it"; }
+	if boat resume "$id" "$type"; then
 		echo "$type" >"$d/type"; rm -f "$d/type.pending"
 	else
 		echo "$(boat_type_size "$cur")" >"$d/size"
@@ -455,10 +354,10 @@ backend_resize() { # NAME CPUS MEM_MIB DISK_GIB (empty = unchanged)
 
 # Remove NAME's sandboxes (every generation), tunnel and local state, whatever exists. Idempotent.
 boat_destroy() {
-	local j id
-	j=$(boat_sandboxes) || exit 1
+	local ids id
+	ids=$(boat_vm_ids "$1") || exit 1
 	remote_tunnel_remove "$1"
-	for id in $(boat_vm_ids "$1" "$j"); do boat_delete "$id" || die "could not delete boat sandbox $id ($1)"; done
+	for id in $ids; do boat_delete "$id" || die "could not delete boat sandbox $id ($1)"; done
 	rm -rf "$(boat_dir "$1")" || die "could not remove $(boat_dir "$1")"
 }
 backend_rm() { backend_exists "$1" || die "no such vm: $1"; boat_destroy "$1"; }
@@ -467,33 +366,24 @@ backend_rm() { backend_exists "$1" || die "no such vm: $1"; boat_destroy "$1"; }
 # A saved snapshot of a running sandbox captures its disk at that moment; the source keeps running.
 backend_capture() { # NAME IMAGE
 	backend_exists "$1" || die "no such vm: $1"
-	local d id img s; d=$(boat_dir "$1"); id=$(boat_id "$1"); img=$(boat_img "$2")
-	s=$(boat_saved) || exit 1
-	[[ -z $(boat_saved_status "$img" "$s") ]] || die "image $2 exists"
+	local d id img st; d=$(boat_dir "$1"); id=$(boat_id "$1"); img=$(boat_img "$2")
+	st=$(boat_saved_status "$img") || exit 1
+	[[ -z $st ]] || die "image $2 exists"
 	mkdir -p "$BOAT_DIR/images"
 	# Recorded first: an interrupted save is still found (and removed) by cleanup_image.
 	printf '%s\t%s\n' "$2" "$(awk '{print $3}' "$d/size")" >"$BOAT_DIR/images/$img"
-	[[ $(boat_get "$id" | jq -r '.state') == archived ]] || boat_sync "$d" || log "warning: couldn't sync $1's filesystems; $2 is crash-consistent"
+	[[ $(boat_state "$id") == archived ]] || boat_sync "$d" || log "warning: couldn't sync $1's filesystems; $2 is crash-consistent"
 	boat_save "$id" "$img" || { rm -f "$BOAT_DIR/images/$img"; die "saving $1 as $2 failed"; }
 }
 backend_images() { # → IMAGE<TAB>CREATED<TAB>SIZE
 	[[ -n $BOAT_PREFIX ]] || return 0
-	local s n st c f i k
-	s=$(boat_saved) || exit 1
-	jq -r --arg p "${BOAT_PREFIX}i-" '.[] | select(.name | startswith($p)) | [.name, .status, ((.createdAt // "") | tostring | .[0:19])] | @tsv' <<<"$s" |
-		while IFS=$'\t' read -r n st c; do
-			f=$BOAT_DIR/images/$n
-			[[ $st == ready && -f $f ]] || continue
-			IFS=$'\t' read -r i k <"$f"
-			[[ $k =~ ^[0-9]{1,5}$ ]] && k="${k}GiB" || k=""
-			printf '%s\t%s\t%s\n' "$i" "$c" "$k"
-		done
+	boat images
 }
 backend_image_rm() {
-	local img s; img=$(boat_img "$1")
-	s=$(boat_saved) || exit 1
-	[[ -n $(boat_saved_status "$img" "$s") ]] || die "no such image: $1"
-	boat_api DELETE "/saved-snapshots/$img" >/dev/null || die "could not remove image $1"
+	local img st; img=$(boat_img "$1")
+	st=$(boat_saved_status "$img") || exit 1
+	[[ -n $st ]] || die "no such image: $1"
+	boat saved-rm "$img" || die "could not remove image $1"
 	rm -f "$BOAT_DIR/images/$img"
 }
 
@@ -502,9 +392,9 @@ backend_image_rm() {
 # interrupted run left behind.
 backend_reimage() {
 	backend_exists "$1" || die "no such vm: $1"
-	local d img j new v type; d=$(boat_dir "$1"); img=$(boat_img "$2")
+	local d img old new v type; d=$(boat_dir "$1"); img=$(boat_img "$2")
 	[[ -f $BOAT_DIR/images/$img ]] || die "no such image: $2"
-	j=$(boat_sandboxes) || exit 1
+	old=$(boat_vm_ids "$1") || exit 1
 	# The image may come from before a resize: keep the VM's own type.
 	type=$(cat "$d/type.pending" 2>/dev/null || cat "$d/type")
 	# Create first, switch after: a failed create leaves the VM as it was.
@@ -512,7 +402,7 @@ backend_reimage() {
 	remote_tunnel_stop "$1"
 	echo "$new" >"$d/id.tmp" && mv "$d/id.tmp" "$d/id" || die "could not record $1's new sandbox $new"
 	echo "$type" >"$d/type"; rm -f "$d/type.pending"
-	for v in $(boat_vm_ids "$1" "$j"); do   # j predates the create: all of these are old
+	for v in $old; do   # listed before the create: all of these are old
 		boat_delete "$v" || log "warning: could not delete $1's old sandbox $v"
 	done
 	boat_attach "$d" "$new" || die "$1 ($new) never came up"
@@ -528,9 +418,9 @@ backend_cleanup_new() { # NAME: remove a VM whose create was interrupted, whatev
 }
 backend_cleanup_image() { # IMAGE: saved or still saving
 	[[ -n $BOAT_PREFIX ]] || return 0
-	local s img; img=$(boat_img "$1")
-	s=$(boat_saved) || exit 1
-	if [[ -n $(boat_saved_status "$img" "$s") ]]; then boat_api DELETE "/saved-snapshots/$img" >/dev/null || die "could not remove image $1"; fi
+	local st img; img=$(boat_img "$1")
+	st=$(boat_saved_status "$img") || exit 1
+	if [[ -n $st ]]; then boat saved-rm "$img" || die "could not remove image $1"; fi
 	rm -f "$BOAT_DIR/images/$img"
 }
 # A save never changes the source, so there is nothing to restore.

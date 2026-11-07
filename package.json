@@ -1,7 +1,7 @@
 {
   "name": "boxery-vm",
-  "version": "0.8.0",
-  "description": "Self-hosted desktop VMs for coding agents; pi extension + MCP server give laptop agents vm_* tools",
+  "version": "0.10.1",
+  "description": "Easiest way to give your coding agents VMs; MCP server + pi extension give agents vm_* tools",
   "keywords": [
     "pi-package",
     "mcp",
@@ -13,19 +13,19 @@
     "lima",
     "kvm"
   ],
-  "homepage": "https://github.com/benvinegar/boxery#readme",
+  "homepage": "https://github.com/modem-dev/boxery#readme",
   "bugs": {
-    "url": "https://github.com/benvinegar/boxery/issues"
+    "url": "https://github.com/modem-dev/boxery/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/benvinegar/boxery.git"
+    "url": "git+https://github.com/modem-dev/boxery.git"
   },
   "author": "Ben Vinegar",
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "os": [
     "linux",
@@ -41,6 +41,8 @@
     "controller/",
     "core/",
     "extension/",
+    "backends/",
+    "guests/",
     "host/",
     "image/",
     "mcp/boxery-mcp.mjs",
@@ -53,7 +55,7 @@
     "test": "node --test test/*.test.mjs",
     "test:shell": "bash test/shell/run.sh",
     "lint": "bash test/lint.sh",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p test && tsc -p evals",
     "prepublishOnly": "npm test"
   },
   "peerDependencies": {
@@ -68,6 +70,6 @@
     "extensions": [
       "./extension/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/benvinegar/boxery/master/docs/computer-use.png"
+    "image": "https://raw.githubusercontent.com/modem-dev/boxery/master/docs/computer-use.png"
   }
 }

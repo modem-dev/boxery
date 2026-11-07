@@ -42,21 +42,26 @@ boxery release "$NAME"           # give it back; the VM is reset
 boxery leases                    # what you hold
 ```
 
-`acquire` exits with status 4 if no VM is free before `--wait` runs out.
+`acquire` exits with status 4 if no VM is free before `--wait` runs out. If you give up first (Ctrl-C), the host notices when it can't hand over a lease it got for you, gives that VM back and notes it in `lease-orphans.log` in its config directory. That needs the connection to close cleanly: if it just drops (a laptop going to sleep), sshd can hold it open for a long time, and the lease's TTL is what frees the VM.
+
+Pool VMs can also run GitHub Actions jobs, each in a freshly reset VM: the host's runner manager holds a lease per runner (holder `github-runner`) on the VMs you give it, and `boxery runners once` holds one for a single job (holder `github-runner-local`). See [GitHub Actions runners](github-runners.md).
 
 ## Guarantees
 
 - **Exclusive.** A pool VM accepts only the host's key and the current lease's key. Each lease gets a fresh ssh keypair, stored in `~/.boxery/leases/`.
 - **Expiring.** TTLs run from 1 minute to 8 hours (default 30 min). The pi extension renews at a third of the TTL. A reaper on the host (systemd timer or launchd agent, every minute) resets expired leases. A sleeping laptop or a crashed agent never strands a VM.
 - **Fenced.** Release or expiry resets the VM to its clean image, which also removes the lease key. Forking a leased VM doesn't carry the lease key over. A holder whose lease is gone is locked out, even with a connection that was already open.
+- **A proxy token per lease.** Each lease gets its own LLM proxy token, and its `http:` grants are bound to that lease. When the lease ends, the token stops working, so a copy taken from inside the VM can't spend through the proxy or use the next holder's grants.
 - **Reboot-safe.** Leases are tied to the host's boot ID. After a host reboot, every lease is void and gets reset.
-- **Crash-safe.** State lives in SQLite (`~/.config/boxery/leases.db`) as a small state machine with generation fencing. A failed acquire or reset never leaves a VM half-assigned. Such VMs are marked `BROKEN` instead, and `pool ls` shows them.
+- **Crash-safe.** State lives in SQLite (`~/.config/boxery/leases.db`) as a small state machine with generation fencing. A failed acquire or reset never leaves a VM half-assigned. Such VMs are marked `broken` instead, and `pool ls` shows them.
 
 ```
-FREE ──acquire──▶ ACQUIRING ──▶ LEASED ──release / expiry / reboot──▶ RESETTING ──▶ FREE
-                                                                          └──fail──▶ BROKEN
+free ──acquire──▶ acquiring ──▶ leased ──release / expiry / reboot──▶ resetting ──▶ free
+                                                                          └──fail──▶ broken
 ```
 
-To recover a `BROKEN` VM, fix it, then run `boxery pool rm NAME && boxery pool add NAME`.
+`pool ls` and `ls` (its LEASE column, `lease.state` in `--json`) show these states.
+
+To recover a `broken` VM, fix it, then run `boxery pool rm NAME && boxery pool add NAME`.
 
 Design notes: [ARCHITECTURE.md → Leases](../ARCHITECTURE.md#leases). Not built yet (gateway, `--keep`, profiles): [plan](plans/2026-11-01-profiles-and-lease-extensions.md).

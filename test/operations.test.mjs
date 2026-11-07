@@ -11,6 +11,7 @@ catch (e) { if (!String(e.message).includes("sqlite")) throw e; }
 const it = L ? test : test.skip;
 const HOST = path.resolve(import.meta.dirname, "../host/boxery-host");
 const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIleasekeyoneleasekeyone holder";
+/** @typedef {import("node:child_process").ChildProcessWithoutNullStreams & { result: Promise<{ code: number | null, stdout: string, stderr: string }> }} HostChild */
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 let dir, conf, vms, env, db, children;
 async function until(fn) {
@@ -18,7 +19,7 @@ async function until(fn) {
 	throw new Error("timed out waiting for lifecycle barrier");
 }
 function run(args, extra = {}, input, { keepInputOpen = false } = {}) {
-	const child = spawn(HOST, args, { env: { ...env, ...extra }, stdio: ["pipe", "pipe", "pipe"] });
+	const child = /** @type {HostChild} */ (spawn(HOST, args, { env: { ...env, ...extra }, stdio: ["pipe", "pipe", "pipe"] }));
 	children.push(child);
 	let stdout = "", stderr = "";
 	child.stdout.on("data", (d) => { stdout += d; });
@@ -39,11 +40,18 @@ async function ok(args, extra, input) {
 }
 const barrier = (name, point) => path.join(vms, ".barriers", `${name}.${point}`);
 const release = (name, point) => writeFileSync(`${barrier(name, point)}.release`, "go");
-const token = (name) => JSON.parse(readFileSync(path.join(conf, "tokens.json")))[name];
+const token = (name) => JSON.parse(/** @type {any} */ (readFileSync(path.join(conf, "tokens.json"))))[name];
 const locks = () => db.prepare("SELECT * FROM operation_locks").all();
-function operationAt(name, point) {
-	const id = readFileSync(barrier(name, point), "utf8").trim();
-	return db.prepare("SELECT * FROM operations WHERE id=?").get(id);
+// The operation paused at a barrier. The barrier file appears before the shell has written the id into
+// it (redirection creates it first), so wait for an id that names a row.
+/** @returns {Promise<any>} */
+async function operationAt(name, point) {
+	let op;
+	await until(() => {
+		const id = readFileSync(barrier(name, point), "utf8").trim();
+		return (op = id ? db.prepare("SELECT * FROM operations WHERE id=?").get(id) : undefined) != null;
+	});
+	return op;
 }
 function cleanJournal() {
 	assert.deepEqual(locks(), []);
@@ -114,7 +122,7 @@ it("duplicate creates serialize preflight and cannot rotate or delete the winnin
 it("a killed supervisor's live worker is stopped before partial-create cleanup and name reuse", async () => {
 	const first = run(["new", "same"], { BOXERY_FAKE_PAUSE: "new" });
 	await until(() => existsSync(barrier("same", "new")));
-	const op = operationAt("same", "new"), oldToken = token("same");
+	const op = await operationAt("same", "new"), oldToken = token("same");
 	assert.ok(O.identity(op.child));
 	first.kill("SIGKILL");
 	await until(() => O.identity(op.owner) == null);
@@ -183,6 +191,7 @@ it("crashed forks keep completed children but clean unfinished children and thei
 	assert.equal(existsSync(path.join(vms, "b")), false);
 	assert.equal(token("b"), undefined);
 	assert.doesNotMatch(await ok(["images"]), /@fork-/);
+	assert.ok(JSON.parse(await ok(["images", "--json"])).every((i) => typeof i.image === "string" && !i.image.includes("@fork-")));
 	cleanJournal();
 });
 
@@ -264,7 +273,7 @@ it("abandoned key installation resets before the VM can be leased to someone els
 	await ok(["new", "pool"]); await ok(["pool", "add", "pool"]);
 	const acquire = run(["acquire", "--holder", "alice"], { BOXERY_TEST_KEY_PAUSE: "1" }, KEY);
 	await until(() => existsSync(barrier("pool", "key")));
-	const op = operationAt("pool", "key");
+	const op = await operationAt("pool", "key");
 	// The outer acquire process waits for a nested supervisor; kill that supervisor explicitly.
 	process.kill(op.owner, "SIGKILL");
 	await until(() => O.identity(op.owner) == null);
@@ -292,13 +301,92 @@ it("reset holds its lock through readiness and finish; stale callbacks cannot cl
 	cleanJournal();
 });
 
+it("a pool VM's proxy token lives exactly as long as a lease, and its grants belong to that lease", async () => {
+	const guestToken = () => readFileSync(path.join(vms, "pool", "home", ".boxery", "token"), "utf8");
+	const edge = () => JSON.parse(readFileSync(path.join(conf, "edge", "pool.json"), "utf8"));
+	const ROUTES = '{"api.example.com":{"headers":{"Authorization":"Bearer x"}}}';
+	await ok(["new", "pool"]);
+	const pet = token("pool"); assert.equal(typeof pet, "string");
+	await ok(["pool", "add", "pool"]);
+	assert.equal(token("pool"), undefined, "a free pool VM has no valid token");
+	assert.notEqual((await run(["edge-set", "pool"], {}, ROUTES).result).code, 0, "no grants without a lease");
+
+	const alice = (await ok(["acquire", "--holder", "alice"], {}, KEY)).split(" ")[1];
+	const first = token("pool");
+	assert.equal(first.lease, alice);
+	assert.notEqual(first.secret, pet);
+	assert.equal(guestToken(), `pool:${first.secret}`, "the guest holds the lease's token");
+	assert.match(readFileSync(path.join(vms, "pool", "home", ".config", "opencode", "opencode.json"), "utf8"), new RegExp(first.secret));
+	await ok(["edge-set", "pool", "--lease", alice], {}, ROUTES);
+	assert.equal(edge().lease, alice);
+	await ok(["release", alice]);
+	assert.equal(token("pool"), undefined, "release revokes the lease's token");
+	assert.equal(existsSync(path.join(conf, "edge", "pool.json")), false);
+
+	const bob = (await ok(["acquire", "--holder", "bob"], {}, KEY)).split(" ")[1];
+	assert.equal(token("pool").lease, bob);
+	assert.notEqual(token("pool").secret, first.secret, "every lease gets a new token");
+	await ok(["edge-set", "pool"], {}, ROUTES);
+	assert.equal(edge().lease, bob, "routes are stamped with the current lease");
+	for (const routes of [ROUTES, "{}"]) {
+		const stale = await run(["edge-set", "pool", "--lease", alice], {}, routes).result;
+		assert.notEqual(stale.code, 0); assert.match(stale.stderr, /not pool's current lease/);
+	}
+	assert.equal(edge().lease, bob, "a stale holder neither replaces nor clears the next holder's routes");
+	// A lease that began before tokens were per lease (host upgraded mid-lease): unstamped routes still match it.
+	writeFileSync(path.join(conf, "tokens.json"), JSON.stringify({ pool: "legacy" }));
+	await ok(["edge-set", "pool"], {}, ROUTES);
+	assert.equal(edge().lease, undefined);
+
+	await ok(["pool", "rm", "pool", "--force"]);
+	const back = token("pool");
+	assert.equal(typeof back, "string", "back to a pet: a token of its own");
+	assert.equal(guestToken(), `pool:${back}`);
+	assert.equal(existsSync(path.join(conf, "edge", "pool.json")), false, "the lease's routes leave with it");
+
+	// Leaving the pool while stopped: no token until the next start issues one.
+	await ok(["pool", "add", "pool"]); await ok(["stop", "pool"]);
+	await ok(["pool", "rm", "pool"]);
+	assert.equal(token("pool"), undefined);
+	await ok(["start", "pool"]);
+	assert.equal(guestToken(), `pool:${token("pool")}`);
+	cleanJournal();
+});
+
+it("a pool VM's llm: grants are host state of the lease: stamped, refused when stale, gone on release", async () => {
+	const file = path.join(conf, "edge", "pool.json");
+	const edge = () => JSON.parse(readFileSync(file, "utf8"));
+	const LLM = '{"llm":["chatgpt"]}';
+	await ok(["new", "pool"]);
+	await ok(["pool", "add", "pool"]);
+	assert.notEqual((await run(["edge-set", "pool"], {}, LLM).result).code, 0, "no llm grant on a free pool VM");
+	assert.equal(existsSync(file), false);
+
+	const alice = (await ok(["acquire", "--holder", "alice"], {}, KEY)).split(" ")[1];
+	await ok(["edge-set", "pool", "--lease", alice], {}, LLM);
+	assert.deepEqual(edge(), { hosts: {}, llm: ["chatgpt"], lease: alice }, "llm-only grants are written, stamped with the lease");
+	await ok(["release", alice]);
+	assert.equal(existsSync(file), false, "release takes the lease's llm grants with it");
+
+	const bob = (await ok(["acquire", "--holder", "bob"], {}, KEY)).split(" ")[1];
+	const stale = await run(["edge-set", "pool", "--lease", alice], {}, LLM).result;
+	assert.notEqual(stale.code, 0, "alice's controller can't grant llm on bob's lease");
+	assert.equal(existsSync(file), false);
+	await ok(["edge-set", "pool", "--lease", bob], {}, '{"llm":["ollama","anthropic"]}');
+	assert.deepEqual(edge(), { hosts: {}, llm: ["anthropic", "ollama"], lease: bob });
+	await ok(["edge-set", "pool", "--lease", bob], {}, '{"llm":[]}');
+	assert.equal(existsSync(file), false, "an empty llm list with no routes clears the file");
+	await ok(["pool", "rm", "pool", "--force"]);
+	cleanJournal();
+});
+
 it("reconcile retries a killed reset immediately rather than waiting for the stale timeout", async () => {
 	await ok(["new", "pool"]); await ok(["pool", "add", "pool"]);
 	const lease = (await ok(["acquire", "--holder", "alice"], {}, KEY)).split(" ")[1];
 	writeFileSync(path.join(vms, "pool", "home", "dirty"), "work");
 	const reset = run(["release", lease], { BOXERY_FAKE_PAUSE: "reimage" });
 	await until(() => existsSync(barrier("pool", "reimage")));
-	const op = operationAt("pool", "reimage"); process.kill(op.owner, "SIGKILL");
+	const op = await operationAt("pool", "reimage"); process.kill(op.owner, "SIGKILL");
 	await until(() => O.identity(op.owner) == null);
 	await ok(["reconcile"]);
 	assert.equal(L.get(db, "pool").state, "FREE");

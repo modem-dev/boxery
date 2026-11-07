@@ -1,5 +1,5 @@
 # shellcheck shell=bash disable=SC2154  # sourced by host/boxery-host (provides die/log/need/ROOT/PROXY_PORT/…)
-# boxery backend: exe.dev (https://exe.dev). Sourced by host/boxery-host. EXPERIMENTAL.
+# boxery backend: exe.dev (https://exe.dev). Sourced by host/boxery-host.
 # Contract: see host/backends/README.md.
 #
 # - VMs run on exe.dev, managed through its ssh API (`ssh exe.dev CMD --json`). The host only needs ssh
@@ -34,8 +34,13 @@ EXE_PORT_BASE=${BOXERY_EXE_PORT_BASE:-22400}     # VM slot S ↔ host port BASE+
 EXE_GUEST_PORT=${BOXERY_EXE_GUEST_PORT:-18088}   # the tunnel's -R end in the guest (LLM proxy)
 EXE_EGRESS=${BOXERY_EXE_EGRESS:-}                # "integrations" to cut VMs off the internet (see README)
 EXE_POOL=${BOXERY_EXE_POOL:-}                    # exe.dev pool for new VMs (Work plans)
-EXE_MAX_CPUS=${BOXERY_EXE_MAX_CPUS:-2}           # Personal plan: 2 vCPU / 4 GB shared by all VMs
-EXE_MAX_MEM=${BOXERY_EXE_MAX_MEM:-4096}          # MiB
+EXE_ALLOW_INTEGRATIONS=${BOXERY_EXE_ALLOW_INTEGRATIONS:-}   # comma-separated integrations not to warn about (see exe_integrations)
+EXE_MAX_CPUS=${BOXERY_EXE_MAX_CPUS:-}            # a VM's largest size; default: the account's (exe_limits)
+EXE_MAX_MEM=${BOXERY_EXE_MAX_MEM:-}              # MiB
+EXE_MAX_DISK=""                                  # GB, the account's
+EXE_DEFAULT_CPUS=2                               # the largest VM when exe.dev can't say (the smallest plan)
+EXE_DEFAULT_MEM=4096                             # MiB
+EXE_LIMIT_SANE=100000                            # a plan field at or above this is garbage, not a limit
 EXE_BASE_DISK=20                                 # GB, the base VM's disk (copies grow from it)
 EXE_SUPERVISOR=${BOXERY_EXE_SUPERVISOR:-$([[ $(uname) == Darwin ]] && echo launchd || echo systemd)}
 EXE_POLL=${BOXERY_EXE_POLL:-15}                  # seconds between build-base progress checks
@@ -123,14 +128,41 @@ exe_edge() { # VM COMMAND (stdin: passed through)
 	# shellcheck disable=SC2086  # dest is "-l USER HOST" or "HOST"
 	"${EXE_SSH[@]}" $dest "$@"
 }
-# CPUS MEM_MIB → "CPUS MEM_MIB" as exe.dev will size the VM: capped to the plan (BOXERY_EXE_MAX_CPUS/MEM),
-# memory in whole GB.
+# The largest VM the account allows, from `billing plan` (Personal: its capacity, which all VMs share;
+# one VM may use all of it). BOXERY_EXE_MAX_CPUS/MEM override it (pools: a pool's size). The last answer
+# is kept in $EXE_DIR/plan.json for when exe.dev can't be asked; without one, EXE_DEFAULT_CPUS/MEM.
+# Call it in the function that creates or resizes, not in a $(subshell).
+exe_limits() {
+	[[ -z $EXE_MAX_CPUS || -z $EXE_MAX_MEM || -z $EXE_MAX_DISK ]] || return 0
+	local j f=$EXE_DIR/plan.json c m k
+	if j=$(exe_do "billing plan" 2>/dev/null) && jq -e '.max_cpus | type == "number"' <<<"$j" >/dev/null 2>&1; then
+		# Best effort, and a temp file of its own: a fork's creates all get here at once.
+		local tmp; tmp=$(mkdir -p "$EXE_DIR" && mktemp "$f.XXXXXX") &&
+			{ jq '{max_cpus, max_memory_gb, max_disk_gb}' <<<"$j" >"$tmp" && mv "$tmp" "$f" || rm -f "$tmp"; }
+	elif [[ -f $f ]]; then
+		j=$(cat "$f"); log "couldn't read the exe.dev account's limits; using the last ones ($f)"
+	else
+		j='{}'; log "couldn't read the exe.dev account's limits; assuming $EXE_DEFAULT_CPUS vCPU / $((EXE_DEFAULT_MEM / 1024)) GB (BOXERY_EXE_MAX_CPUS/MEM set them)"
+	fi
+	# "-" for a missing or odd field, so read keeps the columns
+	read -r c m k <<<"$(jq -r --argjson max "$EXE_LIMIT_SANE" 'def n: if type == "number" and . >= 1 and . < $max then floor else "-" end;
+		"\(.max_cpus | n) \(.max_memory_gb | n) \(.max_disk_gb | n)"' <<<"$j" 2>/dev/null)"
+	[[ $c =~ ^[0-9]+$ ]] || c=$EXE_DEFAULT_CPUS
+	if [[ $m =~ ^[0-9]+$ ]]; then m=$((m * 1024)); else m=$EXE_DEFAULT_MEM; fi
+	[[ $k =~ ^[0-9]+$ ]] || k=""
+	[[ -n $EXE_MAX_CPUS ]] || EXE_MAX_CPUS=$c
+	[[ -n $EXE_MAX_MEM ]] || EXE_MAX_MEM=$m
+	[[ -n $EXE_MAX_DISK ]] || EXE_MAX_DISK=$k
+}
+# CPUS MEM_MIB → "CPUS MEM_MIB" as exe.dev will size the VM: capped to the largest VM the account allows
+# (exe_limits), memory in whole GB. VMs share the account's capacity, so several may add up to more.
 exe_cap() {
-	local c=$1 m=$2
-	if ((c > EXE_MAX_CPUS)); then log "capping to $EXE_MAX_CPUS vCPU (BOXERY_EXE_MAX_CPUS)"; c=$EXE_MAX_CPUS; fi
-	if ((m > EXE_MAX_MEM)); then log "capping to $EXE_MAX_MEM MiB (BOXERY_EXE_MAX_MEM)"; m=$EXE_MAX_MEM; fi
+	local c=$1 m=$2 maxc=${EXE_MAX_CPUS:-$EXE_DEFAULT_CPUS} maxm=${EXE_MAX_MEM:-$EXE_DEFAULT_MEM}
+	if ((c > maxc)); then log "capping to $maxc vCPU, the largest VM this exe.dev account allows (BOXERY_EXE_MAX_CPUS)"; c=$maxc; fi
+	if ((m > maxm)); then log "capping to $maxm MiB, the largest VM this exe.dev account allows (BOXERY_EXE_MAX_MEM)"; m=$maxm; fi
 	echo "$c $((((m + 1023) / 1024) * 1024))"
 }
+exe_disk_ok() { [[ -z $EXE_MAX_DISK ]] || (($1 <= EXE_MAX_DISK)) || die "exe.dev disks are at most ${EXE_MAX_DISK} GB on this account (asked for $1)"; }   # GB
 exe_sizes() { local c m; read -r c m <<<"$(exe_cap "$1" "$2")"; echo "--cpu=$c --memory=$((m / 1024))GB"; }   # → cp/new flags
 exe_pool_flag() { [[ -z $EXE_POOL ]] || echo "--pool=$EXE_POOL"; }
 # cp SRC DST [FLAGS…]: a copy boots fresh from SRC's disk. Fails without leaving DST behind.
@@ -162,7 +194,7 @@ exe_alloc_slot() { remote_alloc_slot "$1"; }
 
 # ---------------------------------------------------------------- setup
 backend_check() {
-	need ssh; need jq; need nc; need node; need openssl
+	need ssh; need jq; need nc; need "${BOXERY_NODE:-node}"; need openssl
 	mkdir -p "$EXE_DIR"   # known_hosts lives here
 	if [[ $EXE_SUPERVISOR == launchd ]]; then need launchctl; else need systemctl; fi
 	[[ -z $EXE_PREFIX || $EXE_PREFIX =~ ^[a-z][a-z0-9-]{0,19}$ ]] || die "BOXERY_EXE_PREFIX must match [a-z][a-z0-9-]{0,19}"
@@ -171,7 +203,18 @@ backend_check() {
   Run 'ssh exe.dev' once in a terminal (re-registering with your account's email adds the key), or set BOXERY_EXE_KEY."
 	jq -e '.email' <<<"$out" >/dev/null 2>&1 || die "unexpected 'whoami' reply from exe.dev: ${out:0:200}"
 }
-backend_init() { mkdir -p "$EXE_DIR/vms"; exe_prefix_ensure; }
+# A host with a battery is probably a laptop that sleeps (#42). macOS: pmset; Linux: sysfs.
+exe_host_has_battery() {
+	if [[ $(uname) == Darwin ]]; then pmset -g batt 2>/dev/null | grep -q InternalBattery
+	else grep -qx Battery "${EXE_POWER_SUPPLY:-/sys/class/power_supply}"/*/type 2>/dev/null; fi
+}
+backend_init() {
+	mkdir -p "$EXE_DIR/vms"; exe_prefix_ensure; exe_limits; exe_init_integrations
+	exe_host_has_battery || return 0
+	log "warning: this host has a battery, so it may sleep. exe.dev VMs reach the LLM proxy only through this host's tunnels:
+    while it sleeps or is offline, agents lose their LLM mid-task. For long-running work, run boxery-host on an
+    always-on machine and use this one as a controller (docs/install.md#exedev)."
+}
 backend_proxy_services() { :; }   # per-VM tunnels carry the proxy; nothing host-wide
 guest_proxy_upstream() { echo "TCP:127.0.0.1:$EXE_GUEST_PORT"; }
 
@@ -209,6 +252,7 @@ $(remote_hostname_restore)"
 backend_build_base() {
 	exe_prefix_ensure
 	local base stg j; base=$(exe_base); stg=${EXE_PREFIX}build
+	exe_limits
 	j=$(exe_ls) || exit 1
 	if exe_has "$stg" "$j"; then exe_do rm "$stg" >/dev/null || die "could not remove a previous build VM $stg"; fi
 	log "creating exe.dev builder VM $stg (exeuntu)"
@@ -244,7 +288,7 @@ backend_build_base() {
 
 backend_has_base() {
 	[[ -n $EXE_PREFIX ]] || return 1
-	local j; j=$(exe_ls) || exit 1
+	local j; j=$(exe_ls) || exit 2
 	exe_has "$(exe_base)" "$j"
 }
 # Local state first (no API call); a VM that only exists on exe.dev (crash before its state dir) still
@@ -256,6 +300,53 @@ backend_exists() {
 	[[ -n $(exe_vms_of "$1" "$j") ]]
 }
 
+# exe.dev integrations keep credentials off the VM and use them for it: llm, http-proxy, github, s3,
+# token mints, the Anthropic/OpenAI workload identity ones… Using one is the owner's choice, but it works
+# outside boxery's proxy and grants, so boxery says when one reaches a VM. New accounts attach `llm` to
+# every VM (auto:all). reflection (the VM's own metadata) and notify (push to the owner's devices) hold no
+# credential; BOXERY_EXE_ALLOW_INTEGRATIONS names others not to mention.
+exe_integrations() { # the account's integrations, a JSON array. An unreachable exe.dev is an error.
+	local j
+	j=$(exe_do "integrations list") || return 1
+	jq -e 'type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "boxery-host: unexpected 'integrations list --json' reply from exe.dev: ${j:0:200}" >&2; return 1; }
+	printf '%s\n' "$j"
+}
+# INTEGRATIONS_JSON TAGS_JSON VM → "NAME<TAB>SPEC<TAB>[--team]" for each credential integration exe.dev
+# attaches to VM: auto:all, vm:VM, or tag:T for one of its tags. VM "": any boxery VM (auto:all, vm:PREFIX…).
+exe_int_attached() {
+	jq -r --argjson tags "$2" --arg vm "$3" --arg p "$EXE_PREFIX" --arg allow "$EXE_ALLOW_INTEGRATIONS" '
+		def ok: type == "string" and test("^[A-Za-z0-9._-]{1,64}$");
+		($allow | split(",")) as $a | .[] | .name as $n | select($n | ok) |
+		select(.type != "reflection" and .type != "notify" and (any($a[]; . == $n) | not)) |
+		(if .isTeam == true then "--team" else "" end) as $team | (.attachments // [])[] | strings |
+		select(test("^(auto:all|vm:[A-Za-z0-9._-]{1,64}|tag:[A-Za-z0-9._-]{1,64})$")) |
+		select(. == "auto:all" or (if $vm == "" then startswith("vm:" + $p)
+			else . == "vm:" + $vm or (startswith("tag:") and (.[4:] as $t | any($tags[]; . == $t))) end)) |
+		[$n, ., $team] | @tsv' <<<"$1"
+}
+# ATTACHED (exe_int_attached's lines) WHO: warn, with how to detach each. Never fails.
+exe_int_warn() {
+	[[ -n $1 ]] || return 0
+	local fix
+	fix=$(awk -F'\t' 'NF { printf "    ssh exe.dev integrations detach %s %s%s\n", $1, $2, ($3 == "" ? "" : " " $3) }' <<<"$1")
+	log "warning: $2 can use exe.dev integration(s) $(cut -f1 <<<"$1" | sort -u | paste -sd, -), with credentials exe.dev holds,
+  outside boxery's proxy and grants. Fine if you meant it (BOXERY_EXE_ALLOW_INTEGRATIONS=NAME,… stops this warning).
+  To keep one off boxery's VMs (detaching auto:all affects the account's other VMs too):
+$fix"
+}
+# new, start and reimages: integrations can be attached at any time (auto:all covers new VMs too).
+exe_integration_check() { # VM NAME
+	local j ints tags
+	{ j=$(exe_ls) && ints=$(exe_integrations); } 2>/dev/null || { log "warning: couldn't check which exe.dev integrations reach $2"; return 0; }
+	tags=$(jq -c --arg n "$1" '[.vms[] | select(.vm_name == $n) | (.tags // [])[]? | strings]' <<<"$j")
+	exe_int_warn "$(exe_int_attached "$ints" "$tags" "$1")" "$2"
+}
+exe_init_integrations() {
+	local ints
+	ints=$(exe_integrations 2>/dev/null) || { log "warning: couldn't list exe.dev integrations"; return 0; }
+	exe_int_warn "$(exe_int_attached "$ints" '[]' "")" "every boxery VM"
+}
+
 # Per-VM identity, as root over the edge (lib/remote.sh). A VM made from another VM's disk also gets its
 # own ssh host keys.
 exe_identity_script() { remote_identity_script "$1" "$2" /usr/local/sbin/boxery-exe-boot.sh regen; }   # USERDATA NAME
@@ -265,7 +356,7 @@ exe_identity_script() { remote_identity_script "$1" "$2" /usr/local/sbin/boxery-
 exe_stock_script() {
 	echo 'set -e'
 	{ echo '#cloud-config'; echo 'write_files:'; layer_files; } >"$1.layers" || return 1
-	node "$ROOT/host/cloudconfig-sh.mjs" "$1.layers" || return 1
+	"${BOXERY_NODE:-node}" "$ROOT/host/cloudconfig-sh.mjs" "$1.layers" || return 1
 	rm -f "$1.layers"
 	awk '$0 == "  - path: /etc/boxery/provision" { f = 1; next } f && /^    content: / { sub(/^    content: /, ""); print; exit }' "$1" |
 		while IFS= read -r l; do printf 'mkdir -p /etc/boxery; echo %q >/etc/boxery/provision\n' "$l"; done
@@ -279,6 +370,7 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 	[[ -n $EXE_PREFIX ]] || die "no exe.dev prefix; run: boxery-host init --backend exe"
 	[[ $name != *- ]] || die "exe.dev names can't end with '-': $name"
 	d=$(exe_dir "$name"); vm=$(exe_vm_new "$name")
+	exe_limits
 	j=$(exe_ls) || exit 1
 	if [[ $from == stock ]]; then
 		src="" srcdisk=0
@@ -296,6 +388,7 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 	# Disks only grow: ask for more than the source only.
 	[[ -n $srcdisk ]] || srcdisk=0
 	if ((disk < srcdisk)); then disk=$srcdisk; fi
+	exe_disk_ok "$disk"
 	echo "$disk" >"$d/disk"
 	echo "$(exe_cap "$cpus" "$mem" 2>/dev/null) $disk" >"$d/size"   # CPUS MEM_MIB DISK_GIB, for backend_size
 	local flags; flags="$(exe_sizes "$cpus" "$mem") $(exe_pool_flag)"
@@ -318,12 +411,13 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 	# Piped, never written to disk: it carries the proxy token.
 	exe_identity_script "$userdata" "$name" | exe_edge "$vm" 'sudo bash -s' >/dev/null || die "applying $name's identity failed"
 	if [[ $from == stock && -n $EXE_EGRESS ]]; then exe_do egress "$vm" "$EXE_EGRESS" >/dev/null || die "exe.dev egress $vm $EXE_EGRESS failed"; fi
+	exe_integration_check "$vm" "$name"
 	j=$(exe_ls) || exit 1
 	exe_tunnel_write "$name" "$j"
 	exe_tunnel_start "$name"
 }
 
-backend_list() { # → lines: NAME<TAB>STATE<TAB>ADDR<TAB>DISK<TAB>TUNNEL
+backend_list() { # → lines: NAME<TAB>STATE<TAB>SSH<TAB>DISK_BYTES<TAB>DISK_USED_BYTES<TAB>TUNNEL
 	[[ -n $EXE_PREFIX ]] || return 0
 	local j n st addr disk tun
 	j=$(exe_ls) || exit 1
@@ -332,11 +426,13 @@ backend_list() { # → lines: NAME<TAB>STATE<TAB>ADDR<TAB>DISK<TAB>TUNNEL
 			[[ $n =~ ^[a-z][a-z0-9-]*$ ]] || continue
 			[[ ! -f $(exe_dir "$n")/vm || $(exe_vm "$n") == "$v" ]] || continue   # a reimage's leftover disk
 			addr="" disk="" tun=""
-			[[ ! -f $(exe_dir "$n")/disk ]] || disk="$(cat "$(exe_dir "$n")/disk")GiB"
+			# the size it was given (exe.dev reports neither size nor usage): DISK_USED stays unknown
+			disk=$(cat "$(exe_dir "$n")/disk" 2>/dev/null) || disk=""
+			if [[ $disk =~ ^[0-9]+$ ]]; then disk=$((disk * 1073741824)); else disk=""; fi
 			[[ ! -f $(exe_dir "$n")/slot ]] || tun=$(exe_tunnel_state "$n")
 			if [[ $st == running && $tun == up ]]; then addr="127.0.0.1:$(exe_port "$n")"; fi
 			[[ $st != stopped ]] || st="shut off"
-			printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$st" "$addr" "$disk" "$tun"
+			printf '%s\t%s\t%s\t%s\t\t%s\n' "$n" "$st" "$addr" "$disk" "$tun"
 		done
 }
 
@@ -358,6 +454,7 @@ backend_start() {
 		# resume restores a paused VM, or cold-boots a stopped one.
 		exe_do resume "$vm" >/dev/null || die "exe.dev resume $vm failed"
 	fi
+	exe_integration_check "$vm" "$1"
 	exe_tunnel_write "$1" "$j"
 	exe_tunnel_start "$1"
 }
@@ -381,6 +478,8 @@ backend_size() { # → CPUS MEM_MIB DISK_GIB, as created/resized (exe.dev's ls d
 backend_resize() { # NAME CPUS MEM_MIB DISK_GIB (empty = unchanged)
 	local vm d c m k j st flags=""; vm=$(exe_vm "$1"); d=$(exe_dir "$1")
 	read -r c m k <"$d/size" || die "no recorded size for $1"
+	exe_limits
+	[[ -z $4 ]] || exe_disk_ok "$4"
 	[[ -z $2 && -z $3 ]] || read -r c m <<<"$(exe_cap "${2:-$c}" "${3:-$m}")"
 	[[ -z $2 ]] || flags="$flags --cpu=$c"
 	[[ -z $3 ]] || flags="$flags --memory=$((m / 1024))GB"
@@ -454,19 +553,23 @@ backend_image_rm() {
 # Idempotent: a retry makes a fresh copy and removes every other generation, the old VM and any copy
 # an interrupted run left behind.
 backend_reimage() {
-	backend_exists "$1" || die "no such vm: $1"
+	backend_exists "$1" || die_unchanged "no such vm: $1"
 	local d new img j v disk srcdisk flags; d=$(exe_dir "$1"); new=$(exe_vm_new "$1"); img=$(exe_img "$2")
-	j=$(exe_ls) || exit 1
-	exe_has "$img" "$j" || die "no such image: $2"
+	j=$(exe_ls) || exit 3
+	exe_has "$img" "$j" || die_unchanged "no such image: $2"
 	disk=$(cat "$d/disk" 2>/dev/null || echo 0); srcdisk=$(exe_disk_of_image "$img" "$j")
+	exe_limits
 	flags=$(exe_pool_flag)
 	# The image may come from before a resize: keep the VM's own CPU and memory.
 	local c m; if read -r c m _ <"$d/size" 2>/dev/null; then flags="$flags $(exe_sizes "$c" "$m")"; fi
 	if ((disk > ${srcdisk:-0})); then flags="$flags --disk=${disk}GB"; fi
 	[[ -z $EXE_EGRESS ]] || flags="$flags --egress=$EXE_EGRESS"
-	# Copy first, switch after: a failed copy leaves the VM as it was.
+	# Copy first, switch after: a failed copy leaves the VM as it was, and exits 3 (die_unchanged) so
+	# a failed revert isn't finished later by recovery.
 	# shellcheck disable=SC2086
-	exe_cp "$img" "$new" $flags || die "copying $2 failed"
+	exe_cp "$img" "$new" $flags || die_unchanged "copying $2 failed"
+	# A pool reset makes a new exe.dev VM, which auto:all integrations attach to.
+	exe_integration_check "$new" "$1"
 	exe_tunnel_stop "$1"
 	echo "$new" >"$d/vm.tmp" && mv "$d/vm.tmp" "$d/vm" || die "could not record $1's new exe.dev VM $new"
 	rm -f "$d/resized"   # the copy booted fresh at the VM's size

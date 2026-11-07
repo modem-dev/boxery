@@ -2,14 +2,14 @@
 
 ← [Docs](README.md)
 
-`mcp/boxery-mcp.mjs` exposes the same `vm_*` tools as the [pi extension](pi-extension.md) to any MCP client: Claude Code, Cursor, opencode, pi, and others. It has no dependencies. It needs Node ≥ 20 and a configured controller (`boxery setup`). Both are built from one tool table, `core/boxery-tools.mjs`, so their tool names, descriptions and schemas match; MCP adds an optional `host` argument, the `hosts`/`host` actions of `vm_manage` and the `hosts` action of `vm_info`.
+`mcp/boxery-mcp.mjs` exposes the same `vm_*` tools as the [pi extension](pi-extension.md) to any MCP client: Claude Code, Cursor, opencode, pi, and others. It has no dependencies. It needs Node ≥ 22.13 and a configured controller (`boxery setup`). Both are built from one tool table, `core/boxery-tools.mjs`, and run its tools the same way, so their tool names, descriptions, schemas and host handling match (`test/frontends.test.mjs` fails if either adds a tool the other lacks without saying why). MCP's own extras are the [live desktop view](#live-desktop-view) and the HTTP transport.
 
 There are two ways to run it:
 
 | | Runs on | Transport | Good for |
 |---|---|---|---|
 | **A. stdio** (recommended) | your laptop | stdin/stdout | Full features. Grants and `vm_copy local:` use your laptop. |
-| **B. HTTP** | the VM host | Streamable HTTP over Tailscale | Nothing to install on clients |
+| **B. HTTP** | the VM host | Streamable HTTP over Tailscale | Nothing to install on clients. `vm_copy local:` is off unless confined with `--copy-root`. |
 
 ## A. stdio on your laptop
 
@@ -41,7 +41,9 @@ From a git checkout, use absolute paths (clients don't expand `~`): `"command": 
 
 ### Multiple hosts, one server
 
-Register profiles with `boxery host add` and select the startup host with `--host NAME`. Every tool accepts optional `host`; `vm_manage {action:"hosts"}` lists profiles and `{action:"host",host:"NAME"}` changes the session host and clears its VM. An explicit other host never inherits the current VM name. Copy endpoints can use `HOST/VM:/path`.
+Register profiles with `boxery host add` and select the startup host with `--host NAME`. Every tool accepts optional `host`; `vm_info {action:"hosts"}` lists them with where each runs (`destination`: `local` or the ssh destination), its recorded `backend`, and `same_as` (other names registered for the same profile directory); and `vm_manage {action:"host",host:"NAME"}` changes the session host and clears its VM. An explicit other host never inherits the current VM name. Copy endpoints can use `HOST/VM:/path`.
+
+`{action:"host_add", name:"exe", dest:"local", backend:"exe"}` registers a host, like `boxery host add exe local --backend exe`: with `backend` it first creates a separate profile for that VM platform on `dest` (its own state, proxy port and services); `profile` uses one that exists there; `buildBase:true` then builds its desktop image. `local` is the machine the server runs on. It uses the user's default ssh key, and doesn't select the host; it becomes the CLI default only when there is none. `{action:"host_rm", name:"exe"}` forgets a registration (never the CLI default; VMs, profile data and grants stay). `{action:"build-base"}` builds the call's host's desktop base image.
 
 See [Named hosts](hosts.md). Pool leases (`vm_lease`) are held against the host the call targets.
 
@@ -58,7 +60,22 @@ claude mcp add --transport http boxery https://my-host.<tailnet>.ts.net:8765/mcp
   --header "Authorization: Bearer $BOXERY_MCP_TOKEN"
 ```
 
-In this mode, "local" means **the machine running MCP**, not necessarily the selected VM host: `vm_copy local:…` copies to and from that server, and grants are read from its env, files and ssh agent.
+In this mode, "local" means **the machine running MCP**, not necessarily the selected VM host, and grants are read from its env, files and ssh agent.
+
+That machine is the control plane, which holds the credentials boxery keeps away from VMs (`proxy.env`, `tokens.json`, the management ssh key, the host pi's OAuth). So `vm_copy` **refuses `local:` endpoints over HTTP by default**: otherwise any MCP client, a prompt-injected agent included, could copy those secrets into a VM, or write `~/.ssh/authorized_keys` from one. VM-to-VM copies still work. To allow local copies, give the server a directory for them:
+
+```bash
+boxery-mcp --http 127.0.0.1:8765 --allow-user you@example.com --copy-root ~/boxery-share
+```
+
+With `--copy-root DIR`, `local:` paths are confined to `DIR`:
+
+- Relative paths resolve inside `DIR`; `..` is refused.
+- Both endpoints are checked by their real path (`realpath`), so a symlink can't lead out of `DIR` in either direction, and a dangling symlink can't be written through.
+- Boxery's own state and the user's keys are refused even inside `DIR`, as is any path that contains them: `$BOXERY_CONF` and other `~/.config/boxery*` profiles, `~/.boxery` and registered profile directories, `~/.ssh`, `~/.gnupg`, `~/.pi`, and the `--token-file`. The server refuses to start if `DIR` is inside one of them.
+- A VM → local copy can create a new path or replace a file, but never merges into or replaces an existing directory: copy to a new path instead. It is extracted in a private staging directory (tar refuses absolute and `..` entries and writes through links within the archive), refused if it hard-links a file outside itself, and moved into place with `rename`, which replaces a symlink rather than following it. Symlinks inside a copied tree arrive as symlinks; later `local:` paths through them are checked like any other.
+
+The `initialize` instructions and the `vm_copy` description tell the agent which of the two applies. stdio mode is unchanged: there `local:` is your own machine. `--copy-root` confines it there too, if you want that.
 
 ## Protocol features
 
@@ -66,8 +83,9 @@ The server speaks MCP `2024-11-05` through `2025-11-25` and sends newer fields o
 
 | Feature | Clients | What it does |
 |---|---|---|
-| Tool annotations | all | `vm_info`, `vm_read` and `vm_screenshot` are `readOnlyHint`, so clients that honor hints skip confirmation for them. File and lifecycle tools are `openWorldHint: false`. `vm_manage` keeps its lookup actions, but `vm_info` is the read-only way to list VMs, shapes, grants and snapshots. |
+| Tool annotations | all | `vm_info`, `vm_read` and `vm_screenshot` are `readOnlyHint`, so clients that honor hints skip confirmation for them. File and lifecycle tools are `openWorldHint: false`. Lookups (VMs, shapes, grants, snapshots, images, versions, hosts) are on `vm_info`; `vm_manage` only changes things. |
 | Progress | all, when the request has `_meta.progressToken` | `notifications/progress` while a call runs: output lines from `vm_bash`, controller lines from `vm_manage` `new`/`fork`/`snap`/`revert`/`rm`, a "creating" line when `use` creates a VM, and an elapsed-time line every 5 s for quiet calls. At most one line per second. Over HTTP the response becomes an SSE stream when the client accepts `text/event-stream`; otherwise it stays JSON without progress. |
+| Elicitation | clients declaring form `elicitation` | `vm_grant` asks the user to approve a grant with `elicitation/create` (no fields, only accept or decline; `mode: "form"` on `2025-11-25`). Over HTTP the call's response becomes an SSE stream carrying the request, and the client POSTs its answer (202). Clients without it, or calls that can't stream, get the `boxery grant` command instead. See [Agents can ask](grants.md#agents-can-ask). |
 | Structured output | `2025-06-18`+ | `vm_jobs` and `vm_info` declare an `outputSchema` and return `structuredContent` next to the same text as before. Tools also get a top-level `title`. |
 | Server description | `2025-11-25`+ | `serverInfo.description` and `websiteUrl`. |
 | Live desktop view | [MCP Apps](https://modelcontextprotocol.io/extensions/apps) clients | `vm_view` (see below). |
@@ -117,14 +135,14 @@ Every call accepts optional `host` and `vm`, using the session selection by defa
 {"action":"release"}
 ```
 
-`acquire` waits up to `wait` seconds (default 60, at most 3600) for a free pool VM, leases it for `ttl` seconds (60–28800, default 1800) and makes it the current VM unless `use` is false. `renew` and `release` take `name` (default: the current VM). A leased VM can't be removed with `vm_manage rm`.
+`acquire` waits up to `wait` seconds (default 60, at most 3600) for a free pool VM, leases it for `ttl` seconds (60–28800, default 1800) and makes it the current VM unless `use` is false. `renew` and `release` take `vm` (default: the current VM). A leased VM can't be removed with `vm_manage rm`.
 
 Leases belong to the MCP session that acquired them. The server renews each one at a third of its TTL while the session is in use, meaning a call is running or one ran within the TTL. They're released when the session ends: stdin closes (stdio), the client sends `DELETE` (HTTP), or the server gets SIGINT/SIGTERM/SIGHUP. An HTTP client that disappears without `DELETE` stops renewing, and the host's reaper resets the VM when the lease expires. A release or expiry resets the VM to its clean image, so anything not copied out is lost. If a renewal fails (the lease expired, or the host rebooted), the lease is dropped and stops being the current VM.
 
 ## Atomic file edits
 
 `vm_edit` (core/MCP, not pi's edit engine) sends one request to the Linux guest,
-requiring Node (image: Node 22) and util-linux `flock`, not Python. One persistent
+requiring Node (image: Node 24) and util-linux `flock`, not Python. One persistent
 per-user lock at `~/.boxery-edit/edit.lock` covers reading the latest file,
 exact-text matching and atomic replacement. Never unlink this lock while editors
 may run. All cooperating edits serialize, including symlink/case aliases, and each
@@ -159,9 +177,10 @@ commit outcome**, not rollback: reread before retrying.
 | `--vm NAME` | Default VM. Without it, the model picks one with `vm_manage {action:"use"}`, and tools fail closed when no `vm` is given. |
 | `--http ADDR:PORT` | Serve Streamable HTTP at `/mcp` instead of stdio. Each MCP session keeps its own current VM. |
 | `--token-file PATH` | Bearer token from a file instead of `$BOXERY_MCP_TOKEN` |
+| `--copy-root DIR` | Allow `vm_copy` `local:` paths, confined to `DIR` (see [B](#b-streamable-http-on-the-host-over-tailscale)). Over HTTP, `local:` is refused without it. |
 | `--allow-user LOGIN` | Also require this `Tailscale-User-Login` header (set by `tailscale serve`). Loopback binds only. Can be repeated. |
 | `--allow-origin ORIGIN` | Accept requests with this `Origin`. Foreign origins are rejected by default. |
-| `--no-auth` | Skip the bearer token. **Local testing only.** |
+| `--no-auth` | Skip the bearer token. **Local testing only:** refused unless `--http` binds loopback (`127.0.0.1`, `::1`, `localhost`). |
 | `--ui` | Offer `vm_view` even to clients that don't advertise MCP Apps support |
 
 ## Testing

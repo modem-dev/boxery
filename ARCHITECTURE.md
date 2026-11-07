@@ -12,6 +12,8 @@ This file describes the system **as built** (v0.7). Designs that aren't implemen
 
 Non-goals (for now): macOS/Windows guests, GPU passthrough, scheduling across hosts, hostile multi-tenant users.
 
+Experimental exception: the [OpenShell backend](docs/openshell.md) offers policy-enforced, non-root headless sandboxes through its authenticated gateway. It does not use Boxery's guest provisioning, proxy/grants, images or lease pools. The VM contracts below otherwise remain unchanged.
+
 ## Trust model
 
 One trusted owner runs agents that are *semi-trusted*: they're yours, but they may be confused or prompt-injected. boxery limits what a VM, and the code running in it, can reach. It isn't a boundary between mutually distrustful people who share a host account. Detail: [docs/security.md](docs/security.md).
@@ -19,8 +21,8 @@ One trusted owner runs agents that are *semi-trusted*: they're yours, but they m
 | Principal | Trusted with |
 |---|---|
 | Control plane (the host running `boxery-host` and `boxery-proxy`) | Everything: LLM credentials, HTTP grant secrets, every VM's token, the management ssh key |
-| A laptop with ssh access to the host | Effectively the control plane (a full shell on it; see [#71](https://github.com/benvinegar/boxery/issues/71)) |
-| An agent using `vm_*` tools | The VMs it can name on the hosts its controller is set up for. It can't create grants |
+| A laptop with ssh access to the host | Effectively the control plane (a full shell on it; see [#71](https://github.com/modem-dev/boxery/issues/71)) |
+| An agent using `vm_*` tools | The VMs it can name on configured hosts. `vm_grant` requests access through a human approval prompt |
 | Code inside a VM | Root in that VM, its own proxy token, and the grants given to that VM |
 
 ## System map
@@ -30,12 +32,13 @@ LAPTOP (or wherever the agent runs)
   Claude Code · Codex · Cursor ──stdio──► mcp/boxery-mcp.mjs ─┐
   pi ───────────────────────────────────► extension/index.ts ─┤ both built from core/boxery-tools.mjs
                                                               │ (one tool table: names, schemas, runners)
+  you ── controller/boxery ──► controller/cli.mjs ──┤ the CLI: same core, plus the terminal (approval)
                                    core/boxery-core.mjs ◄─────┘ ssh transport, files, copy, computer use,
-                                         │                      CDP browser, LeaseKeeper, host profiles
+                                         │                      CDP browser, LeaseKeeper, host profiles;
+                                         │                      lifecycle · leases · grants · profile.mjs
                                          ├─ ssh NAME.boxery (ControlMaster) ─────────────────────┐
-                                         └─ runs controller/boxery (Bash 3.2) for lifecycle,     │
-                                            grants, leases; it writes ~/.boxery/ssh_config       │
-                                                   │ ssh user@host  boxery-host …                │
+                                         └─ hostRun: ssh user@host boxery-host … (or local)      │
+                                                   │                                             │
 CONTROL PLANE (Linux or macOS; may be the laptop itself)   │                                     │
   host/boxery-host (Bash entry) ─┬─ connect NAME ──► host/backend.sh __connect ──► nc VM 22 ◄────┘
                                  └─ everything else ──► host/boxery-host.mjs (Node ≥ 22.13)
@@ -45,28 +48,32 @@ CONTROL PLANE (Linux or macOS; may be the laptop itself)   │                  
         state: ~/.config/boxery/  leases.db (SQLite) · tokens.json · edge/ · authorized_keys · mgmt key
         reaper (systemd timer / launchd agent, every minute): recovery + lease expiry
   proxy/boxery-proxy.mjs on 127.0.0.1:8088
-        /chatgpt /openai /anthropic /ollama   allowlisted inference; the real credential is injected
+        /chatgpt /openai /anthropic /ollama   allowlisted inference for VMs with an llm: grant; the real credential is injected
         /edge/<token>/<host>/…                HTTP grants; granted headers are injected
                      ▲ libvirt, CH: vsock · Lima: user-net gateway · exe: ssh -R tunnel
 VM (Ubuntu 24.04; XFCE desktop unless --headless)
   user agent (passwordless sudo) · sshd · socat 127.0.0.1:8088 → proxy · tmux jobs
-  desktop on :1, noVNC 127.0.0.1:6080, Chrome CDP 127.0.0.1:9222 · grants on tmpfs /run/user/UID/boxery
+  desktop on :1, noVNC 127.0.0.1:6080 (VNC password), Chrome CDP 127.0.0.1:9222 · grants on tmpfs /run/user/UID/boxery
 ```
 
 ## Components
 
 | Component | Runs on | Role |
 |---|---|---|
-| `core/boxery-tools.mjs` | agent machine (or host, for HTTP MCP) | **The `vm_*` tool table**: name, description, JSON Schema and runner for every tool, plus `vm_manage`/`vm_lease` action logic over front-end session hooks. MCP and pi are both built from it, so they can't drift (`test/extension.test.mjs`) |
+| `core/boxery-tools.mjs` | agent machine (or host, for HTTP MCP) | **The `vm_*` tool table**: name, description, JSON Schema and runner for every tool, plus `vm_manage`/`vm_info`/`vm_lease` action logic (hosts included) over front-end session hooks, and `runTool()`, which resolves each call's host and VM. MCP and pi are both built from it and run tools through it, so they can't drift (`test/frontends.test.mjs`: a tool only one front-end has must say why). `test/parity.test.mjs` maps every tool and action to its `boxery` command (or why it has none) and every command back, so the CLI can't silently fall behind either |
 | `core/boxery-core.mjs`, `core/copy-stream.mjs`, `core/atomic-edit.mjs`, `core/shell.mjs` | same | Transport and tool implementation: `sshRun`/`execRemote` (remote process-group kill on cancel), path mapping, read/write/edit (atomic, detects concurrent changes), streaming tar `vm_copy` (local⇄VM⇄VM, across hosts), computer use via xdotool, Playwright over CDP, `LeaseKeeper`, host-profile resolution with `AsyncLocalStorage` |
+| `core/grants.mjs`, `core/grant-operations.mjs`, `core/grant-approval.mjs`, `core/grants-guest.sh` | agent machine | Shared spec/deny-directory validation and prompt text; grant store locking/edits, edge-route application and tmpfs reconciliation. Agent front-ends approve through elicitation/pi dialogs, then call operations in-process, without spawning the CLI. The guest script is a single reconciliation template with values inserted at apply time |
 | `core/boxery-jobs.ts`, `core/boxery-job-runner.sh` | piped into the VM per call | Background jobs (`run --bg`, `jobs`, `logs`, `wait`, `kill`; `vm_jobs`). The helper is erasable TypeScript run by the VM's Node (type stripping, ≥ 22.18), never installed, so a VM always runs the caller's version; it answers in JSON. The runner is plain bash, sent with each start: it runs the command in its own process group, independent of tmux, and records the real exit code. |
+| `backends/index.mjs` | agent machine and host | What each backend declares: supported and tested boxery-host platforms, runtimes, prerequisites and capabilities, as data (no probes). `host/capabilities.mjs` checks against it, `boxery-host backends`/`capabilities` print it, and `vm_info` lists it; it imports nothing. A backend without a declaration (one added as a `.sh` file) runs unchecked ([backends](docs/backends.md)) |
+| `guests/linux.mjs`, `guests/index.mjs` | agent machine and host | What's inside a VM, per guest OS: the agent's home and project, boxery's config and grants directories. `core/` and `host/` both import it instead of keeping their own copies; it imports nothing. Only `linux` exists ([plan](docs/plans/2026-11-03-guest-os-seam.md)) |
 | `mcp/boxery-mcp.mjs` | agent machine (stdio) or host (HTTP) | MCP server. stdio, or Streamable HTTP at `/mcp` (bearer token required, optional Tailscale user allowlist, Origin check; meant for `tailscale serve`, never funnel). Sessions keep their own host and VM. `vm_view` + `mcp/desktop-view.html` give MCP Apps clients a live desktop |
-| `extension/index.ts` | agent machine | pi extension: explicit `vm_*` tools next to pi's built-ins (which stay local), `--vm NAME/new/pool`, `/vm` commands, throwaway VMs and leases tied to the pi session |
-| `controller/boxery` | agent machine | Bash 3.2 CLI: `setup`, host profiles (`host add/use/…`), lifecycle, snapshots and forks, `ssh/run/attach/prompt/jobs`, `desktop/forward`, grants, client-side lease files. Generates `~/.boxery/ssh_config`: `*.boxery` → `ProxyCommand ssh HOST boxery-host connect %h %p`, ControlMaster, per-lease identities, per-VM `ForwardAgent` |
+| `extension/index.ts` | agent machine | pi extension: explicit `vm_*` tools next to pi's built-ins (which stay local), `--vm NAME/new/pool`, `--vm-host`, `/vm` commands, throwaway VMs and leases tied to the pi session |
+| `controller/boxery` + `controller/*.mjs` | agent machine | The CLI. `controller/boxery` is a small Bash shim (it finds Node and passes arguments on byte for byte, like `host/boxery-host`); `controller/cli.mjs` parses commands and runs the same core code MCP and pi do: `core/lifecycle.mjs` (new/fork/rm/start/stop/resize/snap/revert/pin/pool/patch, listings), `core/leases.mjs`, `core/grants.mjs`, `vm_copy` (`cp`), `core/versions.mjs`. What only the CLI has: argument parsing and output formats (unchanged, [cli.md](docs/cli.md)), `/dev/tty` grant approval (`controller/grants.mjs`), terminal commands (`ssh`, `attach`, `desktop`, `forward`, `run`, jobs in `controller/jobs.mjs`, `runners once` with your `gh` login), and the host registry's CLI (`controller/hosts.mjs`: `setup`, `host add/ls/show/use/rm`, over `core/registry.mjs`, which `vm_manage host_add/host_rm` use too). Profiles: `core/profile.mjs` (config, `hostRun` to boxery-host, ssh_config, shared connections) and `core/ssh-config.mjs` (quoting and the ssh_config text). A profile `config` that only assigns the controller's settings (`HOST`, `HOST_BIN`, `HOST_PROFILE`, `IDENTITY`, `GRANT_CONFIRM`, as `setup` writes them) is parsed; any other config is sourced by bash (`set -eu`, with `$CONF_DIR` and the defaults set), and its exported environment reaches host commands. `test/ssh-config.test.mjs` holds the ssh_config text and quoting to the Bash controller's (`test/fixtures/bash-profile.sh`), word for word. Each profile's `ssh_config`: `*.boxery` → `ProxyCommand ssh HOST boxery-host connect %h %p`, ControlMaster, per-lease identities, per-VM `ForwardAgent` |
 | `host/boxery-host` + `host/*.mjs` | control plane | Backend-agnostic VM manager. Bash entry point; `connect` stays in Bash so the ProxyCommand never pays Node startup; everything else is Node. Ownership per module: [host-modules.md](docs/host-modules.md) |
-| `host/backends/*.sh` | control plane | Hypervisor effects only, one allowlisted function per process, arguments as argv ([contract](host/backends/README.md)). libvirt and Lima are stable; Cloud Hypervisor and exe.dev are experimental |
+| `host/backends/*.sh` | control plane | Hypervisor effects only, one allowlisted function per process, arguments as argv ([contract](host/backends/README.md)). libvirt, Lima and exe.dev are stable; Cloud Hypervisor, boat.dev and OpenShell are experimental |
 | `proxy/boxery-proxy.mjs` | control plane | Credential proxy: checks the per-VM token, applies per-route method/path allowlists, body/concurrency/time limits, injects the real credential, refuses WebSocket upgrades (clients use SSE) |
-| `image/layers/*.sh`, `image/base-user-data.yaml` | guest | What boxery adds to Ubuntu: `plumbing` (agent user, proxy bridge, sshd/sysctl/tmux), `devtools` (git, Node 22, pi, opencode, …), `desktop` (XFCE, TigerVNC/noVNC, Chrome, Playwright). Desktop VMs clone a base built once with all three; headless VMs apply the first two at first boot |
+| `image/layers/*.sh`, `image/base-user-data.yaml` | guest | What boxery adds to Ubuntu: `plumbing` (agent user, proxy bridge, sshd/sysctl/tmux), `devtools` (git from the git-core PPA, Node 24, pi, opencode, …), `desktop` (XFCE, TigerVNC/noVNC, Chrome, Playwright). Desktop VMs clone a base built once with all three; headless VMs apply the first two at first boot, plus optional ones (`--layers github-runner`: the pinned GitHub Actions runner) |
+| `host/runners.mjs` | control plane | GitHub Actions runners. Host runners (`boxery-host runners`, a user service): keeps N ephemeral JIT runners waiting, one per leased pool VM; each job's VM is reset after it, and the GitHub token stays on the host. Local runners (`runners __once`, driven by the controller's `boxery runners once`): one runner for one job, registered by the controller with its own `gh` login ([docs/github-runners.md](docs/github-runners.md)) |
 
 ## Deployment shapes
 
@@ -78,24 +85,29 @@ VM (Ubuntu 24.04; XFCE desktop unless --headless)
 | Cloud | laptop (stdio) | the laptop or any always-on box | exe.dev, reached through supervised ssh tunnels |
 | Several hosts | one MCP server / controller | each registered with `boxery host add` | per host ([hosts.md](docs/hosts.md)) |
 
-In HTTP mode "local" means the machine running MCP: `vm_copy local:…` and grant values come from that server ([#68](https://github.com/benvinegar/boxery/issues/68) covers confining this).
+In HTTP mode "local" means the machine running MCP: grant values come from that server, and `vm_copy local:…` is refused unless `--copy-root DIR` confines it to one directory there ([MCP server](docs/mcp.md#b-streamable-http-on-the-host-over-tailscale)).
 
 ## How a tool call flows
 
-- **File and shell tools** (`vm_bash`, `vm_read`, `vm_edit`, `vm_jobs`, computer use, `vm_browser`): core → `ssh -F ~/.boxery/ssh_config NAME.boxery 'bash -c …'`. The first connection runs the ProxyCommand (`ssh HOST boxery-host connect NAME` → `backend_ssh_endpoint` → `nc`); later calls reuse the ControlMaster. Node and the Bash controller aren't involved.
-- **Lifecycle** (`vm_manage`, `vm_info`, `vm_lease`): core → `controller/boxery …` → `ssh HOST boxery-host COMMAND …` → Node supervisor → worker → backend functions and guest ssh. Output is `--json` where the front ends parse it ([cli.md](docs/cli.md)).
+- **File and shell tools** (`vm_bash`, `vm_read`, `vm_edit`, `vm_jobs`, computer use, `vm_browser`): core → `ssh -F PROFILE/ssh_config NAME.boxery 'bash -c …'`. The first connection runs the ProxyCommand (`ssh HOST boxery-host connect NAME` → `backend_ssh_endpoint` → `nc`); later calls reuse the ControlMaster. Neither the CLI nor boxery-host's Node runs (`connect` is Bash).
+- **Leases** (`vm_lease`): core → `core/leases.mjs` in-process → `ssh HOST boxery-host acquire|renew|release …` (`core/profile.mjs` `hostRun`). The CLI's `acquire/renew/release/leases` run the same module, so the local lease record, key and ssh_config handling can't drift, and front ends get typed results instead of parsing CLI output.
+- **Lifecycle** (`vm_manage`, `vm_info`): core → `core/lifecycle.mjs` in-process → `ssh HOST boxery-host COMMAND …` (`core/profile.mjs` `hostRun`) → Node supervisor → worker → backend functions and guest ssh. Listings read the host's `--json`; versions come from `core/versions.mjs`. The CLI runs the same module. Neither MCP nor pi ever starts the CLI (`test/frontends.test.mjs` checks that core, MCP and pi don't reach into `controller/`): host registration is `core/registry.mjs`, pi's `/vm desktop` tunnel `core/desktop.mjs`.
+- **Grants:** CLI → validate/prepare canonical specs → shared prompt text → `/dev/tty` → the shared operation, in-process. MCP/pi → same validation/prompt → client elicitation/dialog → same operation in-process. pi user commands and `--vm-grant` also use its dialog. `grant`, `agent-forward on`, `new` with grants and `fork --grants` require approval; listing, revoke and existing-grant reconciliation do not. File specs retain the approved real path. pi preflights grants before allocating resources, approves throwaway grants before creation, and returns a pool lease immediately on decline/dialog failure. Committed changes finish reconciliation despite caller cancellation; post-commit errors explicitly report saved-but-not-fully-applied state. `GRANT_CONFIRM=off` read literally from the selected profile's config disables **CLI confirmation protection**, never MCP/pi approval. It is intentionally not an environment variable or flag.
 - **Inference from inside a VM**: pi/opencode → `127.0.0.1:8088` (socat) → vsock/TCP/tunnel → `boxery-proxy` → provider.
 
 ## State
 
 | Where | What | Notes |
 |---|---|---|
-| `~/.boxery/` (controller) | `config`, `ssh_config`, `host-registry/`, `profiles/NAME/`, `grants/` (names and paths only, never values), `leases/` (lease records + per-lease ssh keys), ControlMaster sockets | Per host profile; `legacy` is the original root profile |
-| `~/.config/boxery/` (host) | `leases.db`: resource locks, operations and intent journal, pool leases | SQLite, short `BEGIN IMMEDIATE` transactions |
-| | `tokens.json` (VM → proxy secret), `edge/NAME.json` (HTTP grant headers), `proxy.env` (API keys) | `0600`; updated via temp file + rename |
-| | `authorized_keys` (laptop keys for new VMs), `mgmt_ed25519` (host → every VM), `host.env`, `vm-kind/`, `work/OP/` (seeds, removed after the operation) | |
+| `~/.boxery/` (controller) | `host-registry/`, `default-host`, and per host `profiles/NAME/`: `config`, `ssh_config`, `grants/` (names and paths only, never values), `leases/` (lease records + per-lease ssh keys), ControlMaster sockets | Per host profile; every host is registered by name |
+| `~/.config/boxery/` (host) | `leases.db`: resource locks, operations and intent journal, pool leases, and each VM's record (`vm_records`: kind, guest OS ([guests/](guests/)), size) | SQLite, short `BEGIN IMMEDIATE` transactions; schema version in `user_version` |
+| | `host-keys/NAME` (each VM's pinned ssh host key, one known_hosts line) | Written with the seed, removed by `rm`; read by `boxery-host known-hosts` |
+| | `tokens.json` (VM → proxy secret; a leased pool VM's carries its lease id), `edge/NAME.json` (HTTP grant headers, stamped with the lease on a pool VM), `proxy.env` (API keys) | `0600`; updated via temp file + rename |
+| | `authorized_keys` (laptop keys for new VMs), `mgmt_ed25519` (host → every VM), `host.env`, `work/OP/` (seeds, removed after the operation) | From before schema version 2: `vm-kind.imported/`, `vm-os.imported/`, `vm-shapes.imported/`, renamed once their contents were imported into `leases.db`; nothing reads them |
+| | `runners.json` (GitHub runner configuration), `runners.env` (the GitHub token), `runners-state.json` (what each runner slot is doing), `runners.lock` | `0600`; the token never leaves the host ([GitHub runners](docs/github-runners.md)) |
+| | `pre-upgrade/`: `leases.db`, `tokens.json`, `edge/` as they were before the last `upgrade` (and `vm-shapes/`, `vm-kind/`, `vm-os/` when a release that still had them ran it) | Restored if the upgrade rolls back; kept for recovery by hand ([install](docs/install.md#upgrading)) |
 | Hypervisor | VMs, images (`VM@LABEL`), seeds | Owned by the backend |
-| Guest | `~/.boxery/token`, agent configs, `/run/user/UID/boxery/` (pushed grants, tmpfs) | Token rotates on every new VM; grants are gone on reset or reboot |
+| Guest | `~/.boxery/token`, agent configs, `/run/user/UID/boxery/` (pushed grants, tmpfs) | Token rotates on every new VM and every lease; grants are gone on reset or reboot |
 
 ## Images: snapshots, forks and resets are one primitive
 
@@ -111,7 +123,9 @@ Images are **disk-only** (no RAM, so no captured in-memory secrets; processes re
 
 Measured on libvirt: new VM ~13 s; snapshot ~1 s on a running VM; revert ~9 s; fork into 2 ~17 s, into 3 with a 3 GiB working set ~23 s; lease reset ~9 s. Lima vz: headless `new` ~51 s without a base, snapshot ~10 s, fork ~20 s.
 
-**Identity.** A VM made from an image starts with someone else's disk, so it gets a fresh identity. The backend gives it a new MAC, vsock CID, UUID and seed. The guest gets a new hostname, token and agent config, and per-instance `bootcmd` steps wipe `authorized_keys` and the machine-id before sshd starts, so a fork of a leased VM never accepts the lease key. The host then sets the keys again over ssh.
+**Identity.** A VM made from an image starts with someone else's disk, so it gets a fresh identity. The backend gives it a new MAC, vsock CID, UUID and seed. The guest gets a new hostname, token, agent config and ssh host key, and per-instance `bootcmd` steps wipe `authorized_keys` and the machine-id before sshd starts, so a fork of a leased VM never accepts the lease key. The host then sets the keys again over ssh.
+
+**Host keys** ([#70](https://github.com/modem-dev/boxery/issues/70)). `host/hostkeys.mjs`: every seed carries a new ed25519 host key made on the host. sshd presents only that key, and the public half is recorded in `host-keys/NAME`. All ssh to VMs uses `StrictHostKeyChecking yes` with `HostKeyAlias NAME.boxery`. The host's own ssh (`guest.mjs`, `backend.sh`) reads the record directly. A controller's generated `ssh_config` asks the host for it through `KnownHostsCommand boxery-host known-hosts %H`, so there's no local copy to go stale. An image carries its VM's key, so revert and resets keep the record. boat VMs pin the platform-reported key instead (`backend_platform_host_key`). A VM without a record is pinned only through a channel the guest network can't spoof: the hypervisor (`backend_host_key`, libvirt's guest agent) or a loopback endpoint. Otherwise `boxery pin NAME --from-guest` trusts it once.
 
 ## Lifecycle coordination and recovery
 
@@ -131,36 +145,38 @@ FREE ──acquire──▶ ACQUIRING ──▶ LEASED ──release / expiry / 
 - **Claims** are SQLite transactions with a per-VM **generation** and a pool **epoch** (bumped when a VM leaves and rejoins the pool), so reaper, renew, release and reset races resolve to one winner, and a stale callback can't act on a newer lease.
 - **TTL** from 60 s to 8 h (default 30 min). An expired lease can't be renewed. Deadlines are tied to the host's boot ID: after a reboot every lease is void and reset.
 - **Keys.** Each lease gets a fresh ssh keypair. A pool VM's `authorized_keys` holds only the host key and the current holder's key. Release or expiry reimages the VM from `@boxery-clean`, which drops the key and anything the holder installed, and existing agent ssh sessions are ended.
+- **Proxy tokens.** A pool VM has no valid proxy token while it is free. Acquire writes a new one into the guest (token file and agent configs) before the holder's key goes in, and binds it to the lease id in `tokens.json`. Reset revokes it first, before clearing grants or reimaging, so a token the holder copied stops working when the lease ends. Edge routes on a pool VM are stamped with the lease id; the proxy honours them only with that lease's token, and `edge-set --lease` refuses a holder whose lease has moved on.
 - **Holders** are caller-chosen labels. The pi extension and MCP keep their leases with `LeaseKeeper`: renewed at a third of the TTL while the session is in use, released when the session ends (pi: whenever the lease stops being the current VM; MCP: stdin closes, HTTP `DELETE`, or a signal). An abandoned HTTP session stops renewing, and the reaper resets the VM.
 - **Pets vs pool.** VMs made with `new` are pets and the reaper never touches them. `pool add` turns a pet into a pool VM; `pool rm` turns it back.
 
-**What fencing is not:** it keeps cooperating clients apart. A laptop with ordinary ssh access to the host can use the host's management key to reach any VM, leased or not. Enforcing leases needs a restricted host gateway ([#71](https://github.com/benvinegar/boxery/issues/71), [plan](docs/plans/2026-11-01-profiles-and-lease-extensions.md#1-host-gateway-lease-enforcement)).
+**What fencing is not:** it keeps cooperating clients apart. A laptop with ordinary ssh access to the host can use the host's management key to reach any VM, leased or not. Enforcing leases needs a restricted host gateway ([#71](https://github.com/modem-dev/boxery/issues/71), [plan](docs/plans/2026-11-01-profiles-and-lease-extensions.md#1-host-gateway-lease-enforcement)).
 
 ## Secrets
 
 | Kind | Where it lives | How it gets there |
 |---|---|---|
-| LLM credentials | control plane only | `boxery-proxy`. A VM holds a per-VM token, minted at creation and revoked on `rm` |
-| HTTP API tokens (GitHub, npm, …) | control plane, `edge/NAME.json` | `boxery grant NAME http:HOST --cmd …` / `github`. Values are resolved on the controller, pushed to the host, and injected per request at `/edge/`. The guest reaches them via git `insteadOf` and npm registry config. Cleared on `rm` and lease reset |
+| LLM credentials | control plane only | `boxery-proxy`. A pet holds a per-VM token, minted at creation and revoked on `rm`; a pool VM holds one per lease. A VM can use only the providers it's granted (`boxery grant NAME llm:PROVIDER`, listed in `edge/NAME.json`; on a pool VM, bound to the lease). No grant, no LLM access |
+| HTTP API tokens (GitHub, npm, …) | control plane, `edge/NAME.json` | `boxery grant NAME http:HOST --cmd …` / `github`. Values are resolved on the controller, pushed to the host, and injected per request at `/edge/`. The guest reaches them via git `insteadOf` and npm registry config. On a pool VM, bound to the lease. Cleared on `rm` and lease reset |
 | `env:` / `file:` grants | VM tmpfs (`/run/user/UID/boxery`, files `0400`) | Pushed by the controller over ssh and reconciled on grant/revoke, new, start, revert, attach, ssh, and when pi selects the VM |
 | ssh agent | the laptop | Per-VM `ForwardAgent` while connected |
+| GitHub runner token | control plane, `runners.env` | `boxery-host runners token`. Used only by the runner manager to ask GitHub for a single-use JIT runner config per job; only that config enters the runner VM (over ssh stdin), and the lease's reset removes it. Local runners (`boxery runners once`) use the controller's `gh` login instead and send the host only the JIT config, on stdin |
 
-Agents can list grants but never create them ([grants.md](docs/grants.md)).
+Supported grant front-ends require human confirmation by default ([grants.md](docs/grants.md)). This is friction and signalling, not a boundary against an agent running as the user: it can fake a terminal, change the profile config or call internals. Both CLI and tools share deny-directory validation; the CLI additionally permits user-written HTTP/command grants.
 
 **Honest exposure statement.** "tmpfs only" limits *accidental* persistence; it isn't a guarantee. An agent in a VM has root and can read, copy, log or send out any pushed value, and app logs, Docker layers, shell history and agent transcripts (`boxery prompt` logs) can capture values. Mitigations: guests run without swap, with `kernel.core_pattern=|/bin/false`; pushed files are `0400`; resets destroy the disk. The real control is **what** you grant: dev-scoped, rotatable credentials, and `http:` grants (whose values never enter the VM) wherever possible. Production secrets never go to VMs.
 
-Per-VM proxy tokens are an acknowledged exception. They live in the VM's seed, disk and images, and are scoped to the proxy. A new token is minted for every new VM, forks included, and revoked on `rm`. A lease reset doesn't rotate a pool VM's token yet ([#78](https://github.com/benvinegar/boxery/issues/78)).
+Per-VM proxy tokens are an acknowledged exception. They live in the VM's seed, disk and images, and are scoped to the proxy. A new token is minted for every new VM, forks included, and revoked on `rm`. A pool VM's token is minted per lease and revoked when the lease ends, so the clean image and any copy a holder made carry only dead tokens. A pet's token still lasts as long as the VM.
 
 ## Network
 
 | Backend | Guest → proxy | Isolation today |
 |---|---|---|
-| libvirt | socat → vsock CID 2 → host `boxery-vsock.service` → `127.0.0.1:8088` | libvirt `default` NAT. Guests reach the internet, the host's bridge address (sshd), other guests and routed LAN/Tailscale ranges. No anti-spoofing ([#69](https://github.com/benvinegar/boxery/issues/69)) |
+| libvirt | socat → vsock CID 2 → host `boxery-vsock.service` → `127.0.0.1:8088` | libvirt `default` NAT, with the nwfilter `boxery-guest-isolation` on every guest interface (in the domain XML, so it survives forks, reverts, resets and reboots): no MAC/IP/ARP spoofing (DHCP-snooped address), only DHCP/DNS to the host, private ranges dropped (host, other guests, LAN, Tailscale, metadata), IPv6 dropped. `BOXERY_NET_ISOLATION=off` turns it off |
 | Cloud Hypervisor | vsock, as libvirt | One routed TAP per VM; nftables drops guest→host, guest→guest, spoofed sources and private ranges |
-| Lima | TCP to the user-net gateway `192.168.5.2`, which maps to the **host's loopback** | Guests can reach every service on the host's `127.0.0.1`, not only the proxy ([#67](https://github.com/benvinegar/boxery/issues/67)) |
+| Lima | TCP to the user-net gateway `192.168.5.2`, which maps to the **host's loopback** | Lima's user network. On macOS each instance runs under a Seatbelt profile (`sandbox-exec`): on the host's `127.0.0.1` its guest reaches only the proxy and its own ssh port. Services on the Mac's other addresses, and the LAN, stay reachable; Lima on Linux is unconfined ([#67](https://github.com/modem-dev/boxery/issues/67)) |
 | exe.dev | per-VM `ssh -R 127.0.0.1:18088:127.0.0.1:PORT` tunnel from the host | exe.dev's network; only the proxy port is forwarded back |
 
-Inside the VM, everything listens on localhost (noVNC, CDP, the proxy bridge). The desktop is reached only through an ssh tunnel (`boxery desktop`). VM ssh host keys aren't verified today ([#70](https://github.com/benvinegar/boxery/issues/70)). A default-deny egress mode is proposed in [#4](https://github.com/benvinegar/boxery/issues/4).
+Inside the VM, everything listens on localhost (noVNC, CDP, the proxy bridge). The desktop is reached only through an ssh tunnel (`boxery desktop`), and its VNC server needs a password: random, on tmpfs, new for each `boxery desktop` session, handed to noVNC in the URL fragment ([security](docs/security.md#what-a-vm-can-and-cant-reach)). Desktop VMs from a base built before that have none until the base is rebuilt. Every ssh to a VM checks its pinned host key (below). A default-deny egress mode is proposed in [#4](https://github.com/modem-dev/boxery/issues/4).
 
 ## Failure modes
 
@@ -178,28 +194,30 @@ Inside the VM, everything listens on localhost (noVNC, CDP, the proxy bridge). T
 
 ## Capacity and scale
 
-boxery is one control plane per host, and scale is bounded by the hypervisor: CPU, RAM and disk. For example, a 32-core / 125 GB host fits about 10 warm 8 GB app VMs with room left for the host. Overlays start at about 150 MB and grow with use.
+boxery is one control plane per host, and scale is bounded by the hypervisor: CPU, RAM and disk. For example, a 32-core / 125 GB host fits about 10 warm 8 GB app VMs with room left for the host. Overlays start at about 150 MB and grow with use. On libvirt, space the guest frees is returned to the host (discard), so it isn't copied into snapshots and forks either.
 
-Nothing in boxery's own state limits that: lock transactions are short, the proxy reads `tokens.json` per request, and each tool call reuses a ControlMaster. The cost to watch is per-call latency on lifecycle commands, which cross Node → Bash controller → ssh → Bash → Node ([#74](https://github.com/benvinegar/boxery/issues/74)). Named hosts route calls to hosts you pick; nothing schedules VMs across hosts.
+Nothing in boxery's own state limits that: lock transactions are short, the proxy reads `tokens.json` per request, and each tool call reuses a ControlMaster. The cost to watch is per-call latency on lifecycle commands: ssh to the host, then its Node supervisor ([#74](https://github.com/modem-dev/boxery/issues/74) removed the Bash controller from the agents' path). Named hosts route calls to hosts you pick; nothing schedules VMs across hosts.
 
 ## Roadmap
 
-1. **Hardening** of what exists: Lima loopback exposure ([#67](https://github.com/benvinegar/boxery/issues/67)), confining HTTP-MCP `local:` copies ([#68](https://github.com/benvinegar/boxery/issues/68)), libvirt guest isolation ([#69](https://github.com/benvinegar/boxery/issues/69)), pinned VM host keys ([#70](https://github.com/benvinegar/boxery/issues/70)), proxy header and token hardening ([#73](https://github.com/benvinegar/boxery/issues/73)), token rotation on lease reset ([#78](https://github.com/benvinegar/boxery/issues/78)), HTTP MCP bounds and argument validation ([#21](https://github.com/benvinegar/boxery/issues/21), [#72](https://github.com/benvinegar/boxery/issues/72)), scoped MCP tokens ([#3](https://github.com/benvinegar/boxery/issues/3)), default-deny egress ([#4](https://github.com/benvinegar/boxery/issues/4)), per-VM proxy budgets.
-2. **Lease enforcement:** the restricted host gateway and authenticated holders ([#71](https://github.com/benvinegar/boxery/issues/71)). First decide the pool's shape ([#75](https://github.com/benvinegar/boxery/issues/75)).
+1. **Hardening** of what exists: Lima on Linux and Lima guests' reach to the Mac's non-loopback addresses ([#67](https://github.com/modem-dev/boxery/issues/67)), confining HTTP-MCP `local:` copies ([#68](https://github.com/modem-dev/boxery/issues/68)), proxy header and token hardening ([#73](https://github.com/modem-dev/boxery/issues/73)), HTTP MCP bounds and argument validation ([#21](https://github.com/modem-dev/boxery/issues/21), [#72](https://github.com/modem-dev/boxery/issues/72)), scoped MCP tokens ([#3](https://github.com/modem-dev/boxery/issues/3)), default-deny egress ([#4](https://github.com/modem-dev/boxery/issues/4)), per-VM proxy budgets.
+2. **Lease enforcement:** the restricted host gateway and authenticated holders ([#71](https://github.com/modem-dev/boxery/issues/71)). First decide the pool's shape ([#75](https://github.com/modem-dev/boxery/issues/75)).
 3. **Profiles** (app-agnostic setup on top of images), `--keep`, detach/resume semantics for pi, versioned templates, builder VMs for build-time tokens: [plan](docs/plans/2026-11-01-profiles-and-lease-extensions.md).
-4. **Simplification:** move the controller into Node ([#74](https://github.com/benvinegar/boxery/issues/74)), align the Node requirement ([#77](https://github.com/benvinegar/boxery/issues/77)).
-5. **Backends:** exe.dev polish ([#37](https://github.com/benvinegar/boxery/issues/37)–[#42](https://github.com/benvinegar/boxery/issues/42), [#54](https://github.com/benvinegar/boxery/issues/54)), boat.dev ([#60](https://github.com/benvinegar/boxery/issues/60)), Daytona ([#61](https://github.com/benvinegar/boxery/issues/61)).
-6. **Tests** that need real hypervisors: guest→host and cross-VM isolation, expiry under laptop sleep, secret retention after reset, a run from a real Mac.
+4. **Simplification:** align the Node requirement ([#77](https://github.com/modem-dev/boxery/issues/77)). (The controller moved into Node: [#74](https://github.com/modem-dev/boxery/issues/74).)
+5. **Backends:** exe.dev follow-ups ([#37](https://github.com/modem-dev/boxery/issues/37)–[#39](https://github.com/modem-dev/boxery/issues/39), [#54](https://github.com/modem-dev/boxery/issues/54)), boat.dev ([#60](https://github.com/modem-dev/boxery/issues/60)), Daytona ([#61](https://github.com/modem-dev/boxery/issues/61)).
+6. **Guest OS seam:** one definition per guest OS for identity, guest commands, layers and limits, to prepare for macOS guests ([#155](https://github.com/modem-dev/boxery/issues/155)): [plan](docs/plans/2026-11-03-guest-os-seam.md).
+7. **Tests** that need real hypervisors: guest→host and cross-VM isolation (checked by hand on libvirt, [#69](https://github.com/modem-dev/boxery/issues/69); not automated), expiry under laptop sleep, secret retention after reset, a run from a real Mac.
 
 ## Design decisions
 
 - **Explicit `vm_*` tools, not overridden built-ins.** An earlier pi extension replaced `bash`/`read`/`write`/`edit` so they ran in the VM. That conflicted with other extensions that register those tools, and it couldn't redirect what other extensions do locally anyway. Built-ins stay local now, and "project work goes to the VM" is guidance in the system prompt, not enforcement.
 - **Images instead of hypervisor snapshots.** libvirt internal snapshots paused the guest, could capture RAM with secrets, and didn't exist on Lima vz. Disk images map onto every platform (qcow2 overlays, APFS clones, exe.dev `cp`, ZFS/reflink). Pre-image internal snapshots remain usable as "legacy" snapshots.
-- **SQLite, not lock files.** Leases, resource locks and the intent journal share one store with short transactions. A crash leaves a row that recovery can finish or roll back ([#17](https://github.com/benvinegar/boxery/issues/17)).
-- **Host in Node, backends in Bash.** Policy, locking and recovery moved to Node modules with injected dependencies so they can be tested directly ([#18](https://github.com/benvinegar/boxery/issues/18), [plan](docs/plans/2026-11-01-host-orchestration-in-node.md)). Backends stay small Bash files around hypervisor CLIs.
+- **SQLite, not lock files.** Leases, resource locks and the intent journal share one store with short transactions. A crash leaves a row that recovery can finish or roll back ([#17](https://github.com/modem-dev/boxery/issues/17)).
+- **Grant operations in Node, approval in front-ends.** As with `cp`, CLI and tools call one implementation so store edits, validation and application cannot drift. Existing lifecycle/connect paths delegate only reconciliation and do not ask again. The CLI uses its already-selected profile directory rather than re-resolving a changed registry entry. Existing-grant reconciliation tolerates incomplete registry entries but still includes their directory pointers in symlink deny checks; new file-grant validation remains strict. Leases (`core/leases.mjs`), profile/ssh_config plumbing (`core/profile.mjs`, `core/ssh-config.mjs`) and lifecycle (`core/lifecycle.mjs`) are Node; the registry (`core/registry.mjs`) and the desktop tunnel (`core/desktop.mjs`) too; core never runs the CLI ([#74](https://github.com/modem-dev/boxery/issues/74)). `vm_manage new` does not pass grants.
+- **Node for logic, Bash at the edges.** Where boxery decides something (leases, locks, recovery, grants, profiles, the CLI's commands), it is Node: modules with injected dependencies, tested directly, one implementation for the CLI, MCP and pi ([#18](https://github.com/modem-dev/boxery/issues/18), [#74](https://github.com/modem-dev/boxery/issues/74)). Bash is left where it is the better tool or the only one: entry shims (`controller/boxery`, `host/boxery-host`; `connect`, the ssh ProxyCommand of every VM connection, never starts Node), backends that wrap a hypervisor's command line (`host/backends/*.sh`: libvirt, Lima, cloud-hypervisor; exe.dev's CLI over ssh), and what runs in the guest (`image/layers/*.sh`, the job runner, the grant applier: Node may not be there yet, and they are sent each time). Data both sides need is data, not a copy in each language: the host.env settings are one list (`host/host-env.list`) that `host/backend.sh` and `host/config.mjs` read. A backend whose work is an HTTP API is a Node module behind a Bash contract file (`openshell.sh` → `lib/openshell.mjs`; `boat.sh` → `lib/boat.mjs` for boat.dev's REST API, with ssh and tunnels in Bash).
 - **Unsigned fake JWT as the Codex token.** The Codex client derives an account id from a JWT, so a VM gets an `alg: none` JWT whose payload carries `name:secret`. The proxy never treats it as a signed credential.
 
 ## Review log
 
-- 2026-10-31: independent review (pi subagent, read-only), [docs/reviews/2026-10-31-architecture-review.md](docs/reviews/2026-10-31-architecture-review.md). All 13 findings accepted. Since fixed: proxy allowlist and limits, proxy crash on malformed tokens, SQLite leases with generations and boot-ID fencing, per-lease keys, `build-base` refusing to overwrite a base in use, honest secret-exposure text. Still open: host gateway (#71), network isolation (#69, #4), versioned templates, builder VMs.
-- 2026-11-01: architecture review (Claude Code). Findings filed as [#67](https://github.com/benvinegar/boxery/issues/67)–[#78](https://github.com/benvinegar/boxery/issues/78). This file rewritten to describe only the built system ([#22](https://github.com/benvinegar/boxery/issues/22)).
+- 2026-10-31: independent review (pi subagent, read-only), [docs/reviews/2026-10-31-architecture-review.md](docs/reviews/2026-10-31-architecture-review.md). All 13 findings accepted. Since fixed: proxy allowlist and limits, proxy crash on malformed tokens, SQLite leases with generations and boot-ID fencing, per-lease keys, `build-base` refusing to overwrite a base in use, honest secret-exposure text. Still open: host gateway (#71), default-deny egress (#4), versioned templates, builder VMs.
+- 2026-11-01: architecture review (Claude Code). Findings filed as [#67](https://github.com/modem-dev/boxery/issues/67)–[#78](https://github.com/modem-dev/boxery/issues/78). This file rewritten to describe only the built system ([#22](https://github.com/modem-dev/boxery/issues/22)).

@@ -35,6 +35,11 @@ virsh() {
 	blockpull) echo "${5##*/}" >"$V/$2.qcow2" ;;   # DOM vda --base PATH: the disk now sits on PATH
 	domstate) echo running ;;
 	dominfo) [[ -f $T/dom.$2 ]] ;;
+	dumpxml) [[ -f $T/xml.$2 ]] && cat "$T/xml.$2" ;;   # DOM --inactive
+	define) sed -n "s/.*<driver name='qemu' type='qcow2'\(.*\)\/>.*/defined driver:\1/p" "$2" >>"$LOG" ;;
+	net-dumpxml) printf "<network>\n  <name>%s</name>\n  <ip address='192.168.122.1' netmask='255.255.255.0'/>\n</network>\n" "$2" ;;
+	nwfilter-dumpxml) [[ -f $T/nwfilter ]] && cat "$T/nwfilter" ;;
+	nwfilter-define) cp "$2" "$T/nwfilter" ;;
 	*) return 0 ;;   # pool-refresh, autostart, start, destroy, blockcopy, blockjob, domfsfreeze/thaw
 	esac
 }
@@ -83,5 +88,154 @@ called "blockpull boxery-dt vda --base $POOL_DIR/$BASE_VOL" && ok "...the base f
 [[ $(dependents "$BASE_VOL") == 2 ]] && ok "base dependents: the desktop VM and its image, not headless disks" || bad "dependents: $(dependents "$BASE_VOL")"
 rm "$V/boxery-dt.qcow2" "$V/boxery-dt@s1.qcow2"
 [[ $(dependents "$BASE_VOL") == 0 ]] && ok "headless VMs alone don't block build-base" || bad "dependents after rm: $(dependents "$BASE_VOL")"
+
+# --- discards reach the host: new disks get discard=unmap, older domains get it on their next cold start
+before() { local a b; a=$(grep -nF -m1 -- "$1" "$LOG"); b=$(grep -nF -m1 -- "$2" "$LOG"); [[ -n $a && -n $b && ${a%%:*} -lt ${b%%:*} ]]; }
+: >"$LOG"; backend_new dn 2 2048 10 "$tmp/ud"
+called "--disk vol=test/boxery-dn.qcow2,bus=virtio,discard=unmap" && ok "new VM disks pass discards to the host" || bad "virt-install: $(grep virt-install "$LOG")"
+dxml() { printf "<domain>\n  <name>%s</name>\n  <devices>\n    <disk type='volume' device='disk'>\n      <driver name='qemu' type='qcow2'%s/>\n    </disk>\n    <disk type='volume' device='cdrom'>\n      <driver name='qemu' type='raw'/>\n    </disk>\n  </devices>\n</domain>\n" "$1" "$2" >"$T/xml.$1"; }
+dxml boxery-old ""; : >"$LOG"
+ensure_discard boxery-old && called "defined driver: discard='unmap'" && [[ $(grep -c "defined driver" "$LOG") == 1 ]] && ok "an older domain's qcow2 disk gets discard=unmap (the cdrom is left alone)" || bad "ensure_discard: $(cat "$LOG")"
+dxml boxery-old " discard='unmap'"; : >"$LOG"
+! ensure_discard boxery-old && ! called "virsh define" && ok "a domain that already has it isn't redefined" || bad "redefined: $(cat "$LOG")"
+dxml boxery-old " cache='none'"; : >"$LOG"
+! ensure_discard boxery-old && ! called "virsh define" && ok "a disk driver with other attributes is left alone" || bad "custom driver: $(cat "$LOG")"
+dxml boxery-old ""; : >"$LOG"
+backend_start old
+before "defined driver: discard='unmap'" "virsh start boxery-old" && ok "start adds it before booting" || bad "start: $(cat "$LOG")"
+dxml boxery-hl ""; : >"$LOG"
+backend_reimage hl hl@s1
+before "defined driver: discard='unmap'" "virsh start boxery-hl" && ok "reimage (revert, lease reset) adds it before booting" || bad "reimage: $(cat "$LOG")"
+virsh() { case $1 in list) printf 'boxery-a\nboxery-b\nother-vm\n' ;; dumpxml) printf "<driver name='qemu' type='qcow2'/>\n" ;; define) echo "define" >>"$LOG" ;; esac; }
+: >"$LOG"; log() { echo "$*" >>"$LOG"; }
+BOXERY_NET_ISOLATION=off; ISOLATION=off
+backend_init 2>/dev/null
+[[ $(grep -c '^define$' "$LOG") == 2 ]] && called "2 VM(s) will pass discards" && ok "init adds it to every domain of this host, not other domains" || bad "init: $(cat "$LOG")"
+ISOLATION=on
+log() { :; }
+
+# --- guest network isolation (#69): every interface on $NET references the nwfilter
+virsh() {
+	printf 'virsh %s\n' "$*" >>"$LOG"
+	case $1 in
+	net-dumpxml) printf "<network>\n  <ip family='ipv6' address='fd00::1' prefix='64'/>\n  <ip address='192.168.122.1' netmask='255.255.255.0'/>\n</network>\n" ;;
+	nwfilter-list) return 0 ;;
+	nwfilter-dumpxml) [[ -f $T/nwfilter ]] && cat "$T/nwfilter" ;;
+	nwfilter-define) cp "$2" "$T/nwfilter"; echo "defined filter" >>"$LOG" ;;
+	dumpxml) [[ -f $T/xml.$2 ]] && cat "$T/xml.$2" ;;
+	define) cp "$2" "$T/defined.xml"; echo "defined domain" >>"$LOG" ;;
+	vol-info) [[ -f $V/$4 ]] ;;
+	vol-dumpxml) [[ -f $V/$4 ]] && printf "<volume><name>%s</name></volume>\n" "$4" ;;
+	vol-create-as) : >"$V/$3" ;;
+	dominfo) [[ -f $T/dom.$2 ]] ;;
+	*) return 0 ;;
+	esac
+}
+rm -f "$T/nwfilter"; : >"$LOG"
+backend_new iso 2 2048 10 "$tmp/ud"
+netarg=$(sed -n 's/^virt-install .*--network \([^ ]*\) .*/\1/p' "$LOG")
+[[ $netarg == "network=default,model=virtio,filterref.filter=boxery-guest-isolation,"* ]] && ok "new: virt-install's --network references the isolation filter" || bad "new --network: $netarg"
+[[ $netarg == *"@name=DHCPSERVER,"*"@value=192.168.122.1,"* && $netarg == *"@name=CTRL_IP_LEARNING,"*"@value=dhcp"* ]] &&
+	ok "...with DHCPSERVER = the network's IPv4 address and DHCP-snooped guest IPs" || bad "filter parameters: $netarg"
+before "defined filter" "virt-install" && ok "...after defining the filter if it was missing" || bad "filter not defined first: $(cat "$LOG")"
+f=$T/nwfilter
+grep -q "<filter name='boxery-guest-isolation' chain='root'>" "$f" && grep -q "<filterref filter='no-mac-spoofing'/>" "$f" &&
+	grep -q "<filterref filter='no-ip-spoofing'/>" "$f" && grep -q "<filterref filter='no-arp-spoofing'/>" "$f" &&
+	ok "filter: no MAC, IP or ARP spoofing (libvirt's own filters)" || bad "anti-spoofing: $(cat "$f")"
+missing=""; for r in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/3; do
+	grep -q "<rule action='drop' direction='out' priority='2[0-9][0-9]'><all dstipaddr='${r%/*}' dstipmask='${r#*/}'/></rule>" "$f" || missing+=" $r"
+done
+[[ -z $missing ]] && ok "filter: drops the CH backend's private ranges (host, guests, LAN, CGNAT, metadata, multicast)" || bad "not dropped:$missing"
+grep -q "priority='130'><udp dstipaddr='\$DHCPSERVER' dstportstart='53'/>" "$f" && grep -q "priority='120'><udp dstipaddr='\$DHCPSERVER' srcportstart='68' dstportstart='67'/>" "$f" &&
+	! grep -q "<tcp dstipaddr='\$DHCPSERVER' dstportstart='22'" "$f" && grep -q "direction='in' priority='150'><tcp srcipaddr='\$DHCPSERVER' dstportstart='22'/>" "$f" &&
+	ok "filter: DHCP/DNS to the host before the drops; only the host may open ssh to the guest" || bad "host rules: $(cat "$f")"
+grep -q "priority='500'><all/>" "$f" && grep -q "direction='inout' priority='900'><all/>" "$f" && grep -q "<filterref filter='no-other-l2-traffic'/>" "$f" &&
+	ok "filter: the rest goes out (NAT), nothing else comes in, no other L2 protocols" || bad "tail rules: $(cat "$f")"
+uuid=1234abcd; sed -i.bak "s|<filter name='boxery-guest-isolation' chain='root'>|&\n  <uuid>$uuid</uuid>|" "$f"; : >"$LOG"
+backend_init 2>/dev/null
+grep -q "<uuid>$uuid</uuid>" "$f" && called "defined filter" && ok "init redefines the filter in place (same UUID; running guests get the new rules)" || bad "redefine: $(cat "$f")"
+
+# Existing domains: start, reimage and resize add the filter to the persistent config before booting.
+ixml() { # DOM [FILTERREF_XML]
+	printf "<domain>\n  <name>%s</name>\n  <devices>\n    <interface type='network'>\n      <mac address='52:54:00:00:00:01'/>\n      <source network='default'/>\n      <model type='virtio'/>\n%s    </interface>\n    <interface type='network'>\n      <source network='other'/>\n    </interface>\n  </devices>\n</domain>\n" "$1" "${2:-}" >"$T/xml.$1"
+}
+OURS="      <filterref filter='boxery-guest-isolation'>
+        <parameter name='CTRL_IP_LEARNING' value='dhcp'/>
+        <parameter name='DHCPSERVER' value='192.168.122.1'/>
+      </filterref>
+"
+ixml boxery-old; : >"$LOG"; rm -f "$T/defined.xml"
+backend_start old
+before "defined domain" "virsh start boxery-old" && [[ $(grep -c "filterref filter='boxery-guest-isolation'" "$T/defined.xml") == 1 ]] &&
+	grep -q "<parameter name='DHCPSERVER' value='192.168.122.1'/>" "$T/defined.xml" && ok "start: an older domain gets the filter before it boots" || bad "start: $(cat "$LOG") $(cat "$T/defined.xml" 2>/dev/null)"
+awk '/source network=.other./{o=1} o&&/filterref/{f=1} END{exit f}' "$T/defined.xml" && ok "...only on interfaces on \$NET" || bad "other network filtered"
+ixml boxery-old "$OURS"; : >"$LOG"
+backend_start old
+! called "defined domain" && ok "...and a domain that has it isn't redefined" || bad "redefined: $(cat "$LOG")"
+ixml boxery-old "      <filterref filter='my-own-filter'/>
+"; : >"$LOG"
+backend_start old
+! called "defined domain" && ok "...nor one whose interface has another filter" || bad "replaced a foreign filter"
+ixml boxery-hl; rm -f "$T/defined.xml"; : >"$LOG"
+: >"$V/boxery-hl@s1.qcow2"
+backend_reimage hl hl@s1
+before "defined domain" "virsh start boxery-hl" && grep -q boxery-guest-isolation "$T/defined.xml" && ok "reimage (revert, lease reset) adds it before booting" || bad "reimage: $(cat "$LOG")"
+
+# Opt-out: new VMs get no filter, and start removes it from existing ones.
+ISOLATION=off; ixml boxery-old "$OURS"; rm -f "$T/defined.xml"; : >"$LOG"
+backend_start old
+! grep -q filterref "$T/defined.xml" && grep -q "<source network='default'/>" "$T/defined.xml" && ok "BOXERY_NET_ISOLATION=off: start removes the filter" || bad "off start: $(cat "$T/defined.xml" 2>/dev/null)"
+: >"$LOG"; backend_new open 2 2048 10 "$tmp/ud"
+netarg=$(sed -n 's/^virt-install .*--network \([^ ]*\) .*/\1/p' "$LOG")
+[[ $netarg == "network=default,model=virtio" ]] && ! called "nwfilter-define" && ok "...and new VMs get the plain network" || bad "off new: $netarg"
+ISOLATION=bogus
+(backend_start old) 2>/dev/null && bad "an invalid BOXERY_NET_ISOLATION was accepted" || ok "an invalid BOXERY_NET_ISOLATION fails instead of running guests unfiltered"
+ISOLATION=on
+virsh() { case $1 in net-dumpxml) printf "<network><ip address='203.0.113.1' netmask='255.255.255.0'/></network>\n" ;; *) return 0 ;; esac; }
+(net_gateway) 2>/dev/null && bad "a public-range network was accepted" || ok "refuses a network outside the blocked private ranges (guests could reach each other)"
+
+# --- inventory: ssh endpoint as HOST:PORT, the volume's Capacity and Allocation in bytes
+virsh() {
+	case "$1 ${2:-}" in
+	"list --all") printf 'boxery-up\nboxery-down\nother-vm\n' ;;
+	"domstate boxery-up") echo running ;;
+	"domstate boxery-down") echo "shut off" ;;
+	"domifaddr boxery-up") printf ' Name MAC address Protocol Address\n----\n vnet0 52:54:00:aa:bb:cc ipv4 192.0.2.10/24\n' ;;
+	"domifaddr boxery-down") return 1 ;;
+	"vol-info --pool")
+		[[ $4 == boxery-up.qcow2 && ${5:-} == --bytes ]] || return 1
+		printf 'Name:           boxery-up.qcow2\nType:           file\nCapacity:       42949672960 bytes\nAllocation:     1116691456 bytes\n' ;;
+	esac
+}
+printf 'up\trunning\t192.0.2.10:22\t42949672960\t1116691456\ndown\tshut off\t\t\t\n' >"$tmp/list.want"
+backend_list >"$tmp/list.got"
+diff -u "$tmp/list.want" "$tmp/list.got" >/dev/null && ok "backend_list: NAME STATE HOST:22 CAPACITY ALLOCATION (empty = unknown), only this host's domains" || bad "backend_list: $(sed -n l "$tmp/list.got")"
+
+# --- guest → proxy bridge: one unit per profile, named after its proxy unit (#117). Run through
+# host/backend.sh so the prelude (PROXY_PORT, PROXY_UNIT) is what a real init sees.
+bridge() { # PROXY_UNIT PORT → the unit name backend_proxy_services prints
+	HOME=$tmp/bh BOXERY_CONF=$tmp/bc BOXERY_BACKEND=libvirt BOXERY_PROXY_UNIT=$1 BOXERY_PROXY_PORT=$2 "$ROOT/host/backend.sh" backend_proxy_services
+}
+mkdir -p "$tmp/bh/.config/systemd/user" "$tmp/bc"
+U=$tmp/bh/.config/systemd/user
+[[ $(bridge boxery-proxy 8088) == boxery-vsock.service ]] && ok "default profile keeps boxery-vsock.service" || bad "default: $(bridge boxery-proxy 8088 2>&1)"
+[[ $(bridge boxery-proxy-iso 8090) == boxery-vsock-iso.service ]] && ok "profile iso → boxery-vsock-iso.service" || bad "iso: $(bridge boxery-proxy-iso 8090 2>&1)"
+[[ $(bridge boxery-proxy-two 8091) == boxery-vsock-two.service ]] || bad "two"
+grep -q 'VSOCK-LISTEN:8088,.* TCP:127.0.0.1:8088$' "$U/boxery-vsock.service" && grep -qx 'After=boxery-proxy.service' "$U/boxery-vsock.service" &&
+	grep -q 'VSOCK-LISTEN:8090,.* TCP:127.0.0.1:8090$' "$U/boxery-vsock-iso.service" && grep -qx 'After=boxery-proxy-iso.service' "$U/boxery-vsock-iso.service" &&
+	grep -q 'VSOCK-LISTEN:8091,' "$U/boxery-vsock-two.service" &&
+	ok "a later profile's init leaves the others' bridges on their own ports" || bad "bridges: $(grep -h ExecStart "$U"/*.service)"
+# Upgrading a host whose only libvirt profile is named: its old bridge is the shared unit, on its port.
+rm -f "$U"/*.service
+bridge boxery-proxy 8093 >/dev/null; mv "$U/boxery-vsock.service" "$U/old"; sed 's/8093/8094/g' "$U/old" >"$U/boxery-vsock.service"; rm "$U/old"
+mkdir -p "$tmp/sbin"; printf '#!/bin/sh\necho "systemctl $*" >>"%s"\n' "$LOG" >"$tmp/sbin/systemctl"; chmod +x "$tmp/sbin/systemctl"
+: >"$LOG"
+[[ $(PATH=$tmp/sbin:$PATH bridge boxery-proxy-solo 8094 2>/dev/null) == boxery-vsock-solo.service && ! -f $U/boxery-vsock.service ]] && grep -qx "systemctl --user disable --now boxery-vsock.service" "$LOG" &&
+	ok "upgrade: the profile's old shared bridge (same port) is stopped and removed" || bad "retire: $(ls "$U") $(cat "$LOG")"
+bridge boxery-proxy 8088 >/dev/null; : >"$LOG"
+PATH=$tmp/sbin:$PATH bridge boxery-proxy-solo 8094 >/dev/null 2>&1
+[[ -f $U/boxery-vsock.service ]] && grep -q 'VSOCK-LISTEN:8088,' "$U/boxery-vsock.service" && ! grep -q disable "$LOG" && ok "…but the default profile's own bridge is left alone" || bad "default bridge touched: $(cat "$LOG")"
+[[ $(bridge my-proxy 8095) == boxery-vsock-for-my-proxy.service ]] && grep -qx 'After=my-proxy.service' "$U/boxery-vsock-for-my-proxy.service" && ok "a custom BOXERY_PROXY_UNIT gets its own bridge too" || bad "custom: $(bridge my-proxy 8095 2>&1)"
+if bridge 'x;rm -rf /' 8095 >/dev/null 2>&1; then bad "unsafe BOXERY_PROXY_UNIT accepted"; else ok "unsafe BOXERY_PROXY_UNIT refused"; fi
 
 echo "passed: $pass  failed: $fail"; ((fail == 0))

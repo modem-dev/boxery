@@ -1,8 +1,11 @@
 name: ci
+# Skip when a change touches only static docs. A change that also touches code runs everything.
 on:
   push:
     branches: [master]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
 permissions:
   contents: read
 jobs:
@@ -19,7 +22,7 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     strategy:
-      matrix: { node: [20, 22, 24] }
+      matrix: { node: [22, 24, 26] }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

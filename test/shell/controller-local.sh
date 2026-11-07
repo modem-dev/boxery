@@ -7,7 +7,8 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 A=$ROOT/controller/boxery
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export BOXERY_CONF=$tmp/hostconf BOXERY_HOME=$tmp/ctl BOXERY_BACKEND=fake BOXERY_FAKE_DIR=$tmp/vms BOXERY_CACHE=$tmp/cache
-export BOXERY_HOST_BIN=$ROOT/host/boxery-host BOXERY_RUNTIME_DIR=$tmp/run
+export BOXERY_RUNTIME_DIR=$tmp/run
+HOSTBIN=$ROOT/host/boxery-host P=$BOXERY_HOME/profiles/local # `setup local` registers host "local" here
 # Keep git's "global" config inside the fake VM home: never touch the real ~/.config/git/config.
 export XDG_CONFIG_HOME=$tmp/xdg GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_GLOBAL
 mkdir -p "$tmp/bin" "$BOXERY_CONF" "$tmp/run" "$tmp/home/.ssh"
@@ -30,36 +31,50 @@ pass=0; fail=0
 ok() { echo "  ✓ $*"; pass=$((pass + 1)); }
 bad() { echo "  ✗ $*"; fail=$((fail + 1)); }
 
-HOME=$tmp/home "$A" setup local >/dev/null 2>&1 && ok "setup local" || bad "setup local"
-grep -q "^HOST='local'" "$BOXERY_HOME/config" && ok "config records HOST=local" || bad "config"
-grep -q "ProxyCommand \"$ROOT/host/boxery-host\" connect %h %p" "$BOXERY_HOME/ssh_config" && ok "ProxyCommand runs boxery-host directly" || bad "ProxyCommand: $(grep ProxyCommand "$BOXERY_HOME/ssh_config")"
+HOME=$tmp/home "$A" setup local --host-bin "$HOSTBIN" >/dev/null 2>&1 && ok "setup local" || bad "setup local"
+[ "$(cat "$BOXERY_HOME/default-host")" = local ] && ok "the first host becomes the default" || bad "default-host"
+grep -q "^HOST='local'" "$P/config" && ok "config records HOST=local" || bad "config"
+grep -q "ProxyCommand \"$ROOT/host/boxery-host\" connect %h %p" "$P/ssh_config" && ok "ProxyCommand runs boxery-host directly" || bad "ProxyCommand: $(grep ProxyCommand "$P/ssh_config")"
 grep -q AAAAme "$BOXERY_CONF/authorized_keys" && ok "setup registered the key with the local host" || bad "key not registered"
-"$BOXERY_HOST_BIN" build-base >/dev/null 2>&1
+"$HOSTBIN" build-base >/dev/null 2>&1
 "$A" new w1 >/dev/null 2>&1 && ok "new via local host" || bad "new"
 "$A" ls 2>/dev/null | grep -q '^w1 ' && ok "ls shows the VM with GRANTS column" || bad "ls"
 "$A" new w2 --shape small --cpus 3 >/dev/null 2>&1 && [ "$(cat "$tmp/vms/w2/size")" = "3 4096 20" ] && ok "new --shape + size flag passed to the host" || bad "new --shape: $(cat "$tmp/vms/w2/size" 2>&1)"
 "$A" fork w2 w3 >/dev/null 2>&1 && [ "$(cat "$tmp/vms/w3/size")" = "3 4096 20" ] && ok "fork keeps the source's size" || bad "fork size: $(cat "$tmp/vms/w3/size" 2>&1)"
 "$A" ls --json | jq -e '.[] | select(.name == "w2") | .shape == "custom" and .cpus == 3' >/dev/null && ok "ls --json has shape fields" || bad "ls shape: $("$A" ls --json)"
 "$A" shapes --json | jq -e '.default == "standard" and .shapes.large.cpus == 8' >/dev/null && ok "shapes --json via controller" || bad "shapes: $("$A" shapes --json 2>&1)"
+"$A" backends --json | jq -e '.schemaVersion == 1 and (.backends | map(.id) | index("boat") != null)' >/dev/null && ok "backends catalog via controller" || bad "backends catalog"
+BOXERY_BACKEND=boat "$A" capabilities --json | jq -e '.backend.id == "boat" and .backend.runtime.location == "remote" and .capabilities.headless.availability == "unavailable" and .capabilities.diskSnapshots.availability == "unknown"' >/dev/null && ok "conditional capabilities queried on host via controller" || bad "capabilities report"
 if "$A" new w4 --shape 'x;id' >/dev/null 2>&1; then bad "invalid --shape accepted"; else ok "invalid --shape rejected by the controller"; fi
 "$A" new hc --headless >/dev/null 2>&1 && [ "$(cat "$tmp/vms/hc/from")" = stock ] && ok "new --headless passed to the host" || bad "new --headless"
-"$A" ls --json | grep '"name":"hc"' | grep -q '"desktop":false,"grants":' && ok "ls --json: desktop false, with grants" || bad "ls --json headless: $("$A" ls --json)"
+"$A" ls --json | grep '"name":"hc"' | grep '"desktop":false,' | grep -q ',"grants":\[' && ok "ls --json: desktop false, with grants" || bad "ls --json headless: $("$A" ls --json)"
 "$A" ls | grep -q '^hc .* headless ' && ok "ls shows KIND" || bad "ls KIND: $("$A" ls)"
+"$A" ls --refresh --json | jq -e 'map(select(.name == "hc"))[0] | .guest.status == "unknown" and (.grants | type) == "array"' >/dev/null && ok "ls --refresh --json: guest status, with grants" || bad "ls --refresh: $("$A" ls --refresh --json 2>&1)"
+"$A" ls --refresh 2>/dev/null | grep -q '^hc .* headless .* unknown  *-$' && ok "ls --refresh: GUEST before GRANTS" || bad "ls --refresh: $("$A" ls --refresh 2>&1)"
+if "$A" ls --bogus >/dev/null 2>&1; then bad "ls --bogus accepted"; else ok "ls rejects unknown flags"; fi
+for a in "" "x;id" "--wait"; do
+	# shellcheck disable=SC2086
+	if "$A" patch $a >/dev/null 2>&1; then bad "patch $a accepted"; else ok "patch ${a:-(nothing)}: refused"; fi
+done
 "$A" rm hc >/dev/null 2>&1 || true
 if "$A" shapes bogus >/dev/null 2>&1; then bad "shapes bogus accepted"; else ok "shapes rejects extra args"; fi
 "$A" rm w2 >/dev/null 2>&1; "$A" rm w3 >/dev/null 2>&1
 
 printf 'SECRET_FILE=1\n' >"$tmp/dev.env"
 export MY_TOKEN='va lue $with "quotes"'
+# This offline automation fixture explicitly disables interactive confirmation.
+echo 'GRANT_CONFIRM=off' >>"$P/config"
 "$A" grant w1 ssh-agent env:MY_TOKEN env:FROM_CMD --cmd 'echo computed' "file:$tmp/dev.env=project/.env" >/dev/null 2>&1 && ok "grant" || bad "grant"
-! grep -q 'va lue' "$BOXERY_HOME/grants/w1" && ok "grant store holds names, not values" || bad "value leaked into grant store"
-grep -q '^Host w1.boxery' "$BOXERY_HOME/ssh_config" && ok "ssh-agent grant → ForwardAgent for that VM" || bad "ForwardAgent"
+! grep -q 'va lue' "$P/grants/w1" && ok "grant store holds names, not values" || bad "value leaked into grant store"
+grep -q '^Host w1.boxery' "$P/ssh_config" && ok "ssh-agent grant → ForwardAgent for that VM" || bad "ForwardAgent"
 envsh=$tmp/run/boxery/env.sh
 [[ -f $envsh ]] && (unset MY_TOKEN; . "$envsh"; [[ $MY_TOKEN == 'va lue $with "quotes"' && $FROM_CMD == computed ]]) && ok "env values pushed and shell-safe" || bad "env.sh: $(cat "$envsh" 2>/dev/null)"
 link=$tmp/vms/w1/home/project/.env
 [[ -L $link ]] && grep -q SECRET_FILE "$link" && ok "file grant linked into project" || bad "file link"
 grep -qx '/.env' "$tmp/vms/w1/home/project/.git/info/exclude" && ok "file grant git-excluded" || bad "exclude"
-"$A" grants w1 --json | jq -e --arg l "$tmp/dev.env" '. == [{kind: "ssh-agent"}, {kind: "env", var: "MY_TOKEN", cmd: null}, {kind: "env", var: "FROM_CMD", cmd: "echo computed"}, {kind: "file", local: $l, remote: "/home/agent/project/.env"}]' >/dev/null && ok "grants --json" || bad "grants --json: $("$A" grants w1 --json)"
+# File grants store real paths: macOS's /var temp directory is an alias for /private/var.
+grant_local="$(CDPATH='' cd -P "$tmp" && pwd -P)/dev.env"
+"$A" grants w1 --json | jq -e --arg l "$grant_local" '. == [{kind: "ssh-agent"}, {kind: "env", var: "MY_TOKEN", cmd: null}, {kind: "env", var: "FROM_CMD", cmd: "echo computed"}, {kind: "file", local: $l, remote: "/home/agent/project/.env"}]' >/dev/null && ok "grants --json" || bad "grants --json: $("$A" grants w1 --json)"
 "$A" ls --json | jq -e '.[] | select(.name == "w1") | .state == "running" and (.grants | map(.kind) == ["ssh-agent", "env", "env", "file"])' >/dev/null && ok "ls --json merges local grants" || bad "ls --json: $("$A" ls --json)"
 "$A" revoke w1 env:MY_TOKEN "file:$tmp/dev.env" >/dev/null 2>&1
 if (unset MY_TOKEN; . "$envsh"; [[ -z ${MY_TOKEN:-} && $FROM_CMD == computed ]]) && [[ ! -e $link && ! -L $link ]]; then ok "revoke removes exactly the revoked items"; else bad "revoke: env=$(cat "$envsh") link=$(ls -la "$link" 2>&1)"; fi
@@ -71,6 +86,29 @@ if "$A" resize 'bad;name' --cpus 2 >/dev/null 2>&1; then bad "resize accepted an
 if "$A" grant w1 env:1BAD >/dev/null 2>&1; then bad "invalid env name accepted"; else ok "invalid env name rejected"; fi
 if "$A" grant w1 file:/nonexistent >/dev/null 2>&1; then bad "missing file accepted"; else ok "missing file rejected"; fi
 if "$A" grant w1 "file:$tmp/dev.env=../../etc/x" >/dev/null 2>&1; then bad "path traversal accepted"; else ok "remote path traversal rejected"; fi
+# Every apply re-reads granted files: a symlink re-pointed after approval at keys or boxery's own
+# state is skipped (and its old copy removed). Exercise legacy path-spelled stores here.
+G() { HOME=$tmp/home "$A" "$@"; }
+mkdir -p "$tmp/home/.pi/agent" "$tmp/benign"
+printf 'PLAIN=1\n' >"$tmp/plain.env"; printf 'BENIGN\n' >"$tmp/benign/id_ed25519"
+printf 'PRIVATE-SSH\n' >"$tmp/home/.ssh/id_ed25519"; printf 'MGMT-KEY\n' >"$BOXERY_CONF/mgmt_ed25519"; printf 'PI-AUTH\n' >"$tmp/home/.pi/agent/auth.json"
+ln -s "$tmp/plain.env" "$tmp/swap.env"; ln -s "$tmp/benign" "$tmp/kdir"
+# New grants are canonical; seed an old store with the original symlink spellings.
+printf 'file\t%s\tproject/swap.env\nfile\t%s\tproject/kd\n' "$tmp/swap.env" "$tmp/kdir/id_ed25519" >>"$P/grants/w1"
+G grants w1 apply >/dev/null 2>&1
+swap=$tmp/vms/w1/home/project/swap.env kd=$tmp/vms/w1/home/project/kd
+grep -q PLAIN "$swap" && grep -q BENIGN "$kd" && ok "file grants through symlinks are applied" || bad "symlinked file grant: $(cat "$swap" "$kd" 2>&1)"
+for target in "$tmp/home/.ssh/id_ed25519" "$BOXERY_CONF/mgmt_ed25519" "$tmp/home/.pi/agent/auth.json"; do
+	ln -sfn "$target" "$tmp/swap.env"
+	out=$(G grants w1 apply 2>&1)
+	if [[ $out == *"swap.env: now leads through a symlink"*skipped* ]] && ! grep -qs -e PRIVATE -e MGMT -e PI-AUTH "$swap"; then ok "re-pointed symlink to ${target#"$tmp"/} skipped"
+	else bad "re-pointed symlink to $target: $out / $(cat "$swap" 2>&1)"; fi
+done
+ln -sfn "$tmp/home/.ssh" "$tmp/kdir"
+out=$(G grants w1 apply 2>&1)
+[[ $out == *"kdir/id_ed25519: now leads through a symlink"*skipped* ]] &&! grep -qs PRIVATE "$kd" && ok "re-pointed directory symlink to ~/.ssh skipped" || bad "directory swap: $out / $(cat "$kd" 2>&1)"
+if G grant w1 "file:$tmp/home/.ssh/id_ed25519.pub=project/me.pub" >/dev/null 2>&1; then bad "explicit ~/.ssh grant accepted"; else ok "CLI refuses key directories too"; fi
+G revoke w1 "file:$tmp/swap.env" "file:$tmp/kdir/id_ed25519" "file:$tmp/home/.ssh/id_ed25519.pub" >/dev/null 2>&1
 printf '#!/bin/sh\nprintf "pi\\t2\\t1700000000\\t1\\nweird \\"name\\t1\\t1700000001\\t0\\n"\n' >"$tmp/bin/tmux"; chmod +x "$tmp/bin/tmux"
 "$A" sessions w1 --json | jq -e '. == [{name: "pi", windows: 2, created: 1700000000, attached: true}, {name: "weird \"name", windows: 1, created: 1700000001, attached: false}]' >/dev/null && ok "sessions --json (names escaped)" || bad "sessions --json: $("$A" sessions w1 --json 2>&1)"
 printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/tmux"
@@ -79,7 +117,7 @@ rm -f "$tmp/bin/tmux"
 [ "$("$A" leases --json)" = '[]' ] && ok "leases --json with none → []" || bad "leases --json empty"
 [ "$("$A" grants nogrants --json)" = '[]' ] && ok "grants --json with none → []" || bad "grants --json empty"
 "$A" snap w1 s1 >/dev/null 2>&1; [ "$("$A" snaps w1 --json | jq -c 'map({name})')" = '[{"name":"s1"}]' ] && ok "snaps --json via controller" || bad "snaps --json: $("$A" snaps w1 --json 2>&1)"
-"$A" rm w1 >/dev/null 2>&1 && [[ ! -f $BOXERY_HOME/grants/w1 ]] && ! grep -q '^Host w1.boxery' "$BOXERY_HOME/ssh_config" && ok "rm clears grants + ForwardAgent" || bad "rm cleanup"
+"$A" rm w1 >/dev/null 2>&1 && [[ ! -f $P/grants/w1 ]] && ! grep -q '^Host w1.boxery' "$P/ssh_config" && ok "rm clears grants + ForwardAgent" || bad "rm cleanup"
 
 # --- edge (http:) grants: secret goes to the host proxy's route file, never into the VM
 "$A" new e1 >/dev/null 2>&1
@@ -94,7 +132,7 @@ want_basic="Basic $(printf 'x-access-token:%s' "$EDGE_SECRET" | base64 | tr -d '
 [[ $(jq -r '.hosts["api.github.com"].headers.Authorization' "$routes") == "Bearer $EDGE_SECRET" ]] && ok "api.github.com: bearer" || bad "api.github.com header"
 [[ $(jq -r '.hosts["api.example.com"].headers["X-Api-Key"]' "$routes") == k3y && $(jq -r '.hosts["api.example.com"].readonly' "$routes") == true ]] && ok "custom header + readonly" || bad "api.example.com route"
 ! grep -rqs -e "$EDGE_SECRET" -e npm_EDGE2 -e k3y "$tmp/vms/e1" "$tmp/run" && ok "no edge secret anywhere in the VM (disk or tmpfs)" || bad "edge secret leaked into the VM: $(grep -rls -e "$EDGE_SECRET" "$tmp/vms/e1" "$tmp/run")"
-! grep -qs -e "$EDGE_SECRET" "$BOXERY_HOME/grants/e1" && ok "grant store holds the command, not the value" || bad "value in grant store"
+! grep -qs -e "$EDGE_SECRET" "$P/grants/e1" && ok "grant store holds the command, not the value" || bad "value in grant store"
 (. "$envsh"; [[ $BOXERY_EDGE == http://127.0.0.1:8088/edge/e1%3Atok123 && $npm_config_registry == "$BOXERY_EDGE/registry.npmjs.org/" ]]) && ok "BOXERY_EDGE + npm registry exported" || bad "env.sh: $(cat "$envsh")"
 gc=$tmp/run/boxery/gitconfig
 grep -q 'insteadOf = https://github.com/' "$gc" && grep -q '/edge/e1%3Atok123/github.com/' "$gc" && ok "git insteadOf for github.com" || bad "gitconfig: $(cat "$gc" 2>/dev/null)"
@@ -114,48 +152,102 @@ if "$A" grant e1 env:X --readonly >/dev/null 2>&1; then bad "--readonly on env a
 ! grep -q 'github.com' "$gc" && ok "revoke removes the git rewrite" || bad "gitconfig still has github"
 "$A" revoke e1 all >/dev/null 2>&1; "$A" grants e1 apply --quiet >/dev/null 2>&1
 [[ ! -f $routes ]] && ok "revoke all clears the host routes" || bad "routes left: $(cat "$routes")"
+# --- llm: grants: the host proxy refuses every LLM route unless the VM's grants list the provider
+"$A" grant e1 llm:chatgpt llm:ollama >/dev/null 2>&1 && ok "grant llm:chatgpt llm:ollama" || bad "grant llm: $("$A" grant e1 llm:chatgpt 2>&1)"
+[[ $(jq -c '.llm' "$routes" 2>/dev/null) == '["chatgpt","ollama"]' && $(jq -c '.hosts' "$routes") == '{}' ]] && ok "llm grants reach the host's edge file (no http routes needed)" || bad "llm routes: $(cat "$routes" 2>/dev/null)"
+"$A" grants e1 --json | jq -e 'map(select(.kind == "llm") | .provider) == ["chatgpt", "ollama"]' >/dev/null && ok "grants --json lists llm grants" || bad "grants --json llm: $("$A" grants e1 --json)"
+"$A" grants e1 | grep -q 'llm:chatgpt' && "$A" ls | grep '^e1 ' | grep -q 'llm:chatgpt,llm:ollama' && ok "grants and ls show llm grants" || bad "llm in grants/ls"
+for badspec in llm: llm:gemini llm:ChatGPT "llm:chatgpt x"; do
+	if "$A" grant e1 "$badspec" >/dev/null 2>&1; then bad "accepted $badspec"; else ok "rejected $badspec"; fi
+done
+if "$A" grant e1 llm:openai --cmd 'echo k' >/dev/null 2>&1; then bad "llm grant with --cmd accepted"; else ok "llm grants take no --cmd (credential is on the host)"; fi
+"$A" grant e1 http:api.example.com --cmd 'echo v' >/dev/null 2>&1
+[[ $(jq -c '.llm' "$routes") == '["chatgpt","ollama"]' && $(jq -r '.hosts | keys | join(",")' "$routes") == api.example.com ]] && ok "llm and http grants share the edge file" || bad "mixed: $(cat "$routes")"
+"$A" revoke e1 llm:chatgpt >/dev/null 2>&1
+[[ $(jq -c '.llm' "$routes") == '["ollama"]' ]] && ok "revoke llm:chatgpt" || bad "after revoke: $(cat "$routes")"
+"$A" revoke e1 http:api.example.com >/dev/null 2>&1
+[[ $(jq -c '.llm' "$routes") == '["ollama"]' && $(jq -c '.hosts' "$routes") == '{}' ]] && ok "revoking the last http grant keeps llm grants" || bad "after http revoke: $(cat "$routes" 2>/dev/null)"
+"$A" revoke e1 llm:ollama >/dev/null 2>&1
+[[ ! -f $routes ]] && ok "revoking the last llm grant clears the host file (no LLM access)" || bad "llm file left: $(cat "$routes")"
+"$A" new e2 --grant llm:anthropic >/dev/null 2>&1; [[ $(jq -c '.llm' "$BOXERY_CONF/edge/e2.json" 2>/dev/null) == '["anthropic"]' ]] && ok "new --grant llm:anthropic" || bad "new --grant llm: $(cat "$BOXERY_CONF/edge/e2.json" 2>/dev/null)"
+"$A" rm e2 >/dev/null 2>&1; [[ ! -f $BOXERY_CONF/edge/e2.json ]] && ok "rm clears llm grants" || bad "llm grants survived rm"
+
+# Version skew: a controller with llm: grants against a host from before them. That host rejects the
+# {"hosts","llm"} payload: the grant is kept locally, the user is warned, and nothing on the host changes.
+if git -C "$ROOT" cat-file -e 2ee0cd7:host/pool.mjs 2>/dev/null; then
+	old=$tmp/oldhost; mkdir -p "$old"; cp -R "$ROOT/backends" "$ROOT/guests" "$ROOT/host" "$ROOT/proxy" "$ROOT/image" "$ROOT/package.json" "$old/"
+	git -C "$ROOT" show 2ee0cd7:host/pool.mjs >"$old/host/pool.mjs"
+	HOME=$tmp/home "$A" host add old local --host-bin "$old/host/boxery-host" >/dev/null 2>&1
+	echo 'GRANT_CONFIRM=off' >>"$BOXERY_HOME/profiles/old/config"
+	"$A" --host old grant e1 http:api.example.com --cmd 'echo v1' >/dev/null 2>&1
+	[[ $(jq -r '.hosts["api.example.com"].headers.Authorization' "$routes") == "Bearer v1" ]] && ok "old host: http grants still work" || bad "old host http: $(cat "$routes" 2>/dev/null)"
+	before=$(cat "$routes")
+	out=$("$A" --host old grant e1 llm:chatgpt http:api.example.com --cmd 'echo v2' 2>&1); rc=$?
+	[[ $rc == 0 && $out == *"could not set edge routes for e1 on the host"* ]] && ok "old host: llm grant warns, doesn't fail" || bad "old host: rc=$rc $out"
+	[[ $(cat "$routes") == "$before" ]] && ok "old host: edge file unchanged (no LLM access, and the http update waits)" || bad "old host changed routes: $(cat "$routes")"
+	"$A" --host old revoke e1 llm:chatgpt >/dev/null 2>&1
+	[[ $(jq -r '.hosts["api.example.com"].headers.Authorization' "$routes") == "Bearer v2" ]] && ok "old host: once no llm grant is left, the http update goes through" || bad "old host after revoke: $(cat "$routes")"
+	"$A" --host old revoke e1 all >/dev/null 2>&1
+	"$A" host rm old >/dev/null 2>&1 || true
+	"$A" revoke e1 all >/dev/null 2>&1
+else echo "  - pre-llm host/pool.mjs not in git history; skipping version-skew checks"; fi
+
 "$A" grant e1 http:api.example.com --cmd 'echo v' >/dev/null 2>&1
 "$A" rm e1 >/dev/null 2>&1; [[ ! -f $routes ]] && ok "rm deletes edge routes" || bad "routes survived rm"
 
 # --- leases from the controller (local mode → fake backend)
 if node --disable-warning=ExperimentalWarning -e 'require("node:sqlite")' 2>/dev/null; then
 "$A" new lp1 >/dev/null 2>&1
-BOXERY_SSH_WAIT_TRIES=2 "$BOXERY_HOST_BIN" pool add lp1 >/dev/null 2>&1 && ok "pool add via host" || bad "pool add"
+BOXERY_SSH_WAIT_TRIES=2 "$HOSTBIN" pool add lp1 >/dev/null 2>&1 && ok "pool add via host" || bad "pool add"
 out=$("$A" acquire --ttl 600 2>/dev/null) && set -- $out && [ "$1" = lp1 ] && ok "acquire → $1 $2" || bad "acquire: $out"
 lid=${2:-x}
-[ -f "$BOXERY_HOME/leases/$lid.lease" ] && [ -f "$BOXERY_HOME/leases/$lid.key" ] && ok "lease record + private key stored locally" || bad "local lease files"
-[ "$(stat -c %a "$BOXERY_HOME/leases" 2>/dev/null || stat -f %Lp "$BOXERY_HOME/leases")" = 700 ] && ok "leases dir is 0700" || bad "leases dir perms"
-grep -A2 "^Host lp1.boxery" "$BOXERY_HOME/ssh_config" | grep -Fq "IdentityFile \"$BOXERY_HOME/leases/$lid.key\"" && ok "ssh_config uses the lease key for lp1" || bad "ssh_config lease identity"
+[ -f "$P/leases/$lid.lease" ] && [ -f "$P/leases/$lid.key" ] && ok "lease record + private key stored locally" || bad "local lease files"
+[ "$(stat -c %a "$P/leases" 2>/dev/null || stat -f %Lp "$P/leases")" = 700 ] && ok "leases dir is 0700" || bad "leases dir perms"
+grep -A2 "^Host lp1.boxery" "$P/ssh_config" | grep -Fq "IdentityFile \"$P/leases/$lid.key\"" && ok "ssh_config uses the lease key for lp1" || bad "ssh_config lease identity"
 grep -q "boxery-lease" "$tmp/vms/lp1/home/.ssh/authorized_keys" && ok "lease key authorized in the VM" || bad "lease key not in VM"
 "$A" leases | grep -q "^lp1 " && ok "leases lists it" || bad "leases"
 "$A" leases --json | jq -e --arg i "$lid" 'length == 1 and .[0].name == "lp1" and .[0].lease_id == $i and .[0].ttl == 600 and .[0].expires_in > 0 and (.[0].holder | type) == "string"' >/dev/null && ok "leases --json" || bad "leases --json: $("$A" leases --json)"
 "$A" renew lp1 >/dev/null 2>&1 && ok "renew by name" || bad "renew"
 if "$A" acquire >/dev/null 2>&1; then bad "second acquire on a 1-VM pool succeeded"; else ok "pool exhausted for a second acquire"; fi
 "$A" release lp1 >/dev/null 2>&1 && ok "release" || bad "release"
-[ ! -f "$BOXERY_HOME/leases/$lid.lease" ] && [ ! -f "$BOXERY_HOME/leases/$lid.key" ] && ok "release forgets the lease and deletes its key" || bad "lease files left"
-! grep -q "^Host lp1.boxery" "$BOXERY_HOME/ssh_config" && ok "ssh_config entry removed" || bad "ssh_config entry left"
+[ ! -f "$P/leases/$lid.lease" ] && [ ! -f "$P/leases/$lid.key" ] && ok "release forgets the lease and deletes its key" || bad "lease files left"
+! grep -q "^Host lp1.boxery" "$P/ssh_config" && ok "ssh_config entry removed" || bad "ssh_config entry left"
 ! grep -q "boxery-lease" "$tmp/vms/lp1/home/.ssh/authorized_keys" && ok "VM no longer accepts the old lease key" || bad "old lease key still authorized"
 "$A" acquire >/dev/null 2>&1 && ok "VM can be acquired again after release" || bad "re-acquire"
 else echo "  - node:sqlite unavailable; skipping lease checks"; fi
 
 # --- fork from the controller: forks are pets with their own grants (none, unless --grants)
 "$A" new fk >/dev/null 2>&1
-"$A" grant fk ssh-agent env:FROM_CMD --cmd 'echo computed' >/dev/null 2>&1
+"$A" grant fk ssh-agent env:FROM_CMD --cmd 'echo computed' llm:chatgpt >/dev/null 2>&1
 echo fork-me >"$tmp/vms/fk/home/project/f.txt"
 "$A" fork fk fk1 >/dev/null 2>&1 && grep -q fork-me "$tmp/vms/fk1/home/project/f.txt" && ok "fork via controller" || bad "fork"
-[ ! -f "$BOXERY_HOME/grants/fk1" ] && ! grep -q '^Host fk1.boxery' "$BOXERY_HOME/ssh_config" && ok "fork does not inherit grants by default" || bad "grants leaked into fork"
-"$A" fork fk fk2 --grants >/dev/null 2>&1 && grep -q '^Host fk2.boxery' "$BOXERY_HOME/ssh_config" && grep -q '^env	FROM_CMD' "$BOXERY_HOME/grants/fk2" && ok "fork --grants copies the grant list" || bad "fork --grants"
+[ ! -f "$P/grants/fk1" ] && ! grep -q '^Host fk1.boxery' "$P/ssh_config" && ok "fork does not inherit grants by default" || bad "grants leaked into fork"
+[[ -f $BOXERY_CONF/edge/fk.json && ! -f $BOXERY_CONF/edge/fk1.json ]] && ok "a fork gets no LLM access from its source" || bad "llm grant leaked into fork: $(cat "$BOXERY_CONF/edge/fk1.json" 2>/dev/null)"
+"$A" fork fk fk2 --grants >/dev/null 2>&1 && grep -q '^Host fk2.boxery' "$P/ssh_config" && grep -q '^env	FROM_CMD' "$P/grants/fk2" && ok "fork --grants copies the grant list" || bad "fork --grants"
+[[ $(jq -c .llm "$BOXERY_CONF/edge/fk2.json" 2>/dev/null) == '["chatgpt"]' ]] && ok "fork --grants: the copied llm grant reaches the host" || bad "fork --grants llm: $(cat "$BOXERY_CONF/edge/fk2.json" 2>/dev/null)"
 if "$A" fork fk 'x;id' >/dev/null 2>&1; then bad "invalid fork name accepted"; else ok "invalid fork name rejected"; fi
 "$A" snap fk s1 >/dev/null 2>&1; "$A" new fk3 --from fk@s1 >/dev/null 2>&1 && grep -q fork-me "$tmp/vms/fk3/home/project/f.txt" && ok "new --from via controller" || bad "new --from"
 if "$A" new fk4 --from 'fk;id' >/dev/null 2>&1; then bad "bad --from accepted"; else ok "bad --from rejected"; fi
 for n in fk fk1 fk2 fk3; do "$A" rm "$n" >/dev/null 2>&1 || true; done
 
-# --- concurrent grant/revoke must not corrupt the store or the guest state (P1 #9)
+# --- concurrent grant/revoke must not corrupt the store or the guest state (P1 #9). Several rounds:
+# the store lock was once a `mkdir`, which uutils coreutils (Ubuntu 26.04) lets racers share.
 "$A" new w4 >/dev/null 2>&1
-for i in 1 2 3 4 5 6; do env "V$i=x" "$A" grant w4 "env:V$i" >/dev/null 2>&1 & done; wait
-[ "$(grep -c '^env' "$BOXERY_HOME/grants/w4")" = 6 ] && ok "6 parallel grants → 6 entries" || bad "grant store: $(cat "$BOXERY_HOME/grants/w4")"
-for i in 1 2 3 4 5 6; do "$A" revoke w4 "env:V$i" >/dev/null 2>&1 & done; wait
-[ ! -f "$BOXERY_HOME/grants/w4" ] && ok "6 parallel revokes → store empty" || bad "left: $(cat "$BOXERY_HOME/grants/w4" 2>/dev/null)"
+gr_ok=1 rv_ok=1
+for r in 1 2 3; do
+	for i in 1 2 3 4 5 6 7 8; do env "V$i=x" "$A" grant w4 "env:V$i" >/dev/null 2>&1 & done; wait
+	[ "$(grep -c '^env' "$P/grants/w4")" = 8 ] || { gr_ok=""; bad "round $r grant store: $(cat "$P/grants/w4")"; }
+	for i in 1 2 3 4 5 6 7 8; do "$A" revoke w4 "env:V$i" >"$tmp/revoke$i" 2>&1 & done; wait
+	[ ! -f "$P/grants/w4" ] || { rv_ok=""; bad "round $r left: $(cat "$P/grants/w4") revokes said: $(cat "$tmp"/revoke?)"; rm -f "$P/grants/w4"; }
+done
+[ -z "$gr_ok" ] || ok "8 parallel grants → 8 entries (3 rounds)"
+[ -z "$rv_ok" ] || ok "8 parallel revokes → store empty (3 rounds)"
+env V1=x "$A" grant w4 env:V1 >/dev/null 2>&1
+: >"$P/grants/.w4.lock"   # another writer holds the store
+"$A" revoke w4 all >/dev/null 2>&1 & sleep 0.3
+[ -f "$P/grants/w4" ] && ok "revoke all waits for the grant-store lock" || bad "revoke all ignored the lock"
+rm -f "$P/grants/.w4.lock"; wait
+[ ! -f "$P/grants/w4" ] && ok "revoke all, once the lock is free" || bad "revoke all left: $(cat "$P/grants/w4")"
 "$A" rm w4 >/dev/null 2>&1 || true
 
 # --- regression (code review P0 #1): args must not be re-parsed by the host shell
@@ -174,10 +266,12 @@ exec sh -c "\$*"
 STUB2
 chmod +x "$tmp/bin/sshjoin"
 rm -f "$tmp/pwned"
-( export BOXERY_HOST=fakehost; ssh() { "$tmp/bin/sshjoin" "$@"; }; export -f ssh
-  . /dev/stdin <<<"$(sed -n '/^literal()/p; /^literal_args()/p' "$A")"
-  cmdline="echo $(literal_args snap w2 "x; touch $tmp/pwned #")"
-  sh -c "$cmdline" >/dev/null )
+# (the command the CLI sends a remote host: core/ssh-config.mjs's remoteCommand, joined by ssh, run by sh)
+cmdline=$(node --input-type=module -e '
+	const { remoteCommand } = await import(process.argv[1]);
+	process.stdout.write(remoteCommand({ hostBin: "echo" }, ["snap", "w2", process.argv[2]]));
+' "$ROOT/core/ssh-config.mjs" "x \$(touch $tmp/pwned); touch $tmp/pwned #")
+"$tmp/bin/sshjoin" -T user@host "$cmdline" >/dev/null 2>&1
 [ ! -e "$tmp/pwned" ] && ok "remote transport quotes every argument" || bad "INJECTION via remote transport"
 "$A" rm w2 >/dev/null 2>&1 || true
 
@@ -232,18 +326,57 @@ u=0
 
 # version: the controller and the host (here, the same checkout) agree, so there is no warning.
 v=$("$A" version --json 2>/dev/null) || v=""
-case $v in '{"controller":{"version":"'*'"host":{"name":"legacy","version":"'*'"behind":false}') ok "version --json reports controller and host" ;; *) bad "version --json: $v" ;; esac
-out=$("$A" version 2>&1) && printf '%s\n' "$out" | grep -q '^controller ' && printf '%s\n' "$out" | grep -q '^host .*\[legacy\]' && ! printf '%s\n' "$out" | grep -q 'older' && ok "version (text), no skew warning" || bad "version: $out"
+case $v in '{"controller":{"version":"'*'"host":{"name":"local","version":"'*'"behind":false}') ok "version --json reports controller and host" ;; *) bad "version --json: $v" ;; esac
+out=$("$A" version 2>&1) && printf '%s\n' "$out" | grep -q '^controller ' && printf '%s\n' "$out" | grep -q '^host .*\[local\]' && ! printf '%s\n' "$out" | grep -q 'older' && ok "version (text), no skew warning" || bad "version: $out"
 # A host that predates `version` (any failure) is reported as behind, with the manual path.
-BOXERY_HOST_BIN=$tmp/old-host; printf '#!/bin/sh\nexit 1\n' >"$tmp/old-host"; chmod +x "$tmp/old-host"
-out=$(BOXERY_HOST_BIN=$tmp/old-host "$A" version 2>&1); printf '%s\n' "$out" | grep -q "predates 'boxery-host version'" && ok "version: old host gets the manual upgrade path" || bad "old host: $out"
-rc=0; out=$(BOXERY_HOST_BIN=$tmp/old-host "$A" upgrade-host 2>&1) || rc=$?
+printf '#!/bin/sh\nexit 1\n' >"$tmp/old-host"; chmod +x "$tmp/old-host"
+mkdir -p "$tmp/old-profile"; cp "$P/ssh_config" "$tmp/old-profile/"
+sed "s|^HOST_BIN=.*|HOST_BIN='$tmp/old-host'|" "$P/config" >"$tmp/old-profile/config"
+"$A" host add old --config-dir "$tmp/old-profile" >/dev/null
+out=$("$A" --host old version 2>&1); printf '%s\n' "$out" | grep -q "predates 'boxery-host version'" && ok "version: old host gets the manual upgrade path" || bad "old host: $out"
+rc=0; out=$("$A" --host old upgrade-host 2>&1) || rc=$?
 [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -q "predates 'upgrade'" && ok "upgrade-host refuses a host without upgrade, explains the one-time manual step" || bad "upgrade-host on old host: rc=$rc $out"
 # skew_note: a host behind the controller (release or commits after the same tag) gets a hint.
 sn() { "$A" __skew "$@"; }
-[ -n "$(sn 0.8.0 v0.8.0 0.7.0 v0.7.0 legacy)" ] && ok "skew: older release" || bad "skew: older release"
+[ -n "$(sn 0.8.0 v0.8.0 0.7.0 v0.7.0 local)" ] && ok "skew: older release" || bad "skew: older release"
 sn 0.7.0 v0.7.0-15-gabc 0.7.0 v0.7.0-3-gdef hornet | grep -q 'boxery --host hornet upgrade-host' && ok "skew: same release, fewer commits; hint names the host" || bad "skew: commits"
-[ -z "$(sn 0.7.0 v0.7.0 0.8.0 v0.8.0 legacy)" ] && ok "skew: a newer host is fine" || bad "skew: newer host"
-[ -z "$(sn 0.7.0 '' 0.7.0 '' legacy)" ] && ok "skew: equal npm releases are fine" || bad "skew: equal"
+[ -z "$(sn 0.7.0 v0.7.0 0.8.0 v0.8.0 local)" ] && ok "skew: a newer host is fine" || bad "skew: newer host"
+[ -z "$(sn 0.7.0 '' 0.7.0 '' local)" ] && ok "skew: equal npm releases are fine" || bad "skew: equal"
+
+# --- desktop: the VM's VNC password (image/layers/desktop.sh) and `boxery desktop`'s URL. The ssh stub runs
+# the "VM" side here with the layer's real boxery-vnc-password; vncpasswd is a stand-in that keeps the text.
+D=$ROOT/image/layers/desktop.sh
+grep -q -- '-SecurityTypes VncAuth -PasswordFile %t/boxery-vnc/passwd ' "$D" && ! grep -q 'SecurityTypes None' "$D" &&
+	grep -q '^ExecStartPre=/usr/local/bin/boxery-vnc-password$' "$D" && ok "desktop layer: VNC needs a password, made before every start" || bad "desktop layer: VNC unit"
+"$A" new d1 >/dev/null 2>&1
+url_re='^==> desktop for d1 at http://127\.0\.0\.1:[0-9]+/vnc\.html\?autoconnect=1&resize=remote&reconnect=1'
+old_re="$url_re  " new_re="$url_re#password=[A-Za-z0-9]{8}  "
+rc=0; out=$("$A" desktop d1 --no-open 2>"$tmp/err") || rc=$?
+[ "$rc" = 0 ] && [[ $out =~ $old_re ]] && grep -q "d1's desktop has no VNC password" "$tmp/err" &&
+	ok "desktop, image without the VNC password: no password in the URL, a warning" || bad "desktop, old image: rc=$rc $out $(cat "$tmp/err")"
+awk '/^cat >\/usr\/local\/bin\/boxery-vnc-password <<.EOF.$/{f=1; next} f&&/^EOF$/{exit} f' "$D" >"$tmp/bin/boxery-vnc-password"
+printf '#!/bin/sh\nprintf obf:; cat\n' >"$tmp/bin/vncpasswd"; chmod +x "$tmp/bin/boxery-vnc-password" "$tmp/bin/vncpasswd"
+export XDG_RUNTIME_DIR=$tmp/xdg-run; pf=$tmp/xdg-run/boxery-vnc/passwd
+mode() { if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
+[ -z "$(boxery-vnc-password)" ] && [ "$(mode "$pf")" = 600 ] && [ "$(mode "${pf%/*}")" = 700 ] && grep -Eqx 'obf:[A-Za-z0-9]{8}' "$pf" &&
+	ok "boxery-vnc-password: a random 8-character password, 0600 in a 0700 dir" || bad "vnc password file: $(ls -la "${pf%/*}" 2>&1) $(cat "$pf" 2>&1)"
+cp "$pf" "$tmp/pf0"; boxery-vnc-password; cmp -s "$pf" "$tmp/pf0" && ok "boxery-vnc-password: keeps an existing one (the service restarting)" || bad "a service start replaced the password"
+p=$(boxery-vnc-password --new)
+[[ $p =~ ^[A-Za-z0-9]{8}$ ]] && [ "$(cat "$pf")" = "obf:$p" ] && ok "boxery-vnc-password --new: replaces it and prints it" || bad "--new: $p / $(cat "$pf")"
+rc=0; out=$("$A" desktop d1 --no-open 2>"$tmp/err") || rc=$?
+pw=${out##*#password=}; pw=${pw%% *}
+[ "$rc" = 0 ] && [[ $out =~ $new_re ]] && [ "$(cat "$pf")" = "obf:$pw" ] && [ "$pw" != "$p" ] && [ ! -s "$tmp/err" ] &&
+	ok "desktop: a fresh password for the session, only in the URL fragment" || bad "desktop URL: rc=$rc $out $(cat "$tmp/err")"
+out=$("$A" desktop d1 --no-open 2>/dev/null); pw2=${out##*#password=}; pw2=${pw2%% *}
+[ -n "$pw2" ] && [ "$pw2" != "$pw" ] && [ "$(cat "$pf")" = "obf:$pw2" ] && ok "desktop: the next session replaces it" || bad "second session: $out"
+printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/vncpasswd"
+rc=0; out=$("$A" desktop d1 --no-open 2>&1) || rc=$?
+[ "$rc" != 0 ] && [[ $out != *"==> desktop"* ]] && [ "$(cat "$pf")" = "obf:$pw2" ] && ok "desktop: no tunnel when the password can't be set" || bad "desktop, failing vncpasswd: rc=$rc $out"
+rc=0; out=$("$A" desktop nosuch --no-open 2>&1) || rc=$?
+[ "$rc" != 0 ] && [[ $out != *"==> desktop"* ]] && ok "desktop: no tunnel to an unreachable VM" || bad "desktop nosuch: rc=$rc $out"
+rc=0; out=$("$A" desktop -oProxyCommand=x --no-open 2>&1) || rc=$?
+[ "$rc" != 0 ] && [[ $out == *"invalid VM name"* ]] && ok "desktop: invalid VM name rejected" || bad "desktop, bad name: rc=$rc $out"
+rm -f "$tmp/bin/boxery-vnc-password" "$tmp/bin/vncpasswd"; unset XDG_RUNTIME_DIR
+"$A" rm d1 >/dev/null 2>&1 || true
 
 echo; echo "passed: $pass  failed: $fail"; [ "$fail" -eq 0 ]

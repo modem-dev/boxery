@@ -13,7 +13,8 @@ fake_checkpoint() { # POINT NAME
 }
 backend_check() { :; }
 backend_init() { mkdir -p "$FAKE"; }
-backend_proxy_services() { :; }
+# A bridge unit name, like libvirt's (profile_unit), so tests see which one init enables. No file is written.
+backend_proxy_services() { echo "$(profile_unit boxery-fake-bridge).service"; }
 guest_proxy_upstream() { echo "TCP:fake-gateway:$PROXY_PORT"; }
 backend_build_base() { mkdir -p "$FAKE"; touch "$FAKE/.base"; }
 backend_has_base() { [[ -f $FAKE/.base ]]; }
@@ -26,7 +27,7 @@ fake_disk_copy() { # SRC_DIR DST_DIR: copy everything that isn't hypervisor stat
 }
 backend_new() { # NAME CPUS MEM DISK USERDATA [SOURCE: VM@LABEL image | stock]
 	mkdir -p "$FAKE/$1/home" "$FAKE/.ports"
-	local p=22000; while ! mkdir "$FAKE/.ports/$p" 2>/dev/null; do p=$((p + 1)); done   # atomic: parallel creates
+	local p=22000; while ! take_lock "$FAKE/.ports/$p"; do p=$((p + 1)); done   # atomic: parallel creates
 	echo "$p" >"$FAKE/$1/port"
 	[[ -z ${BOXERY_FAKE_FAIL_NEW:-} ]] || { echo running >"$FAKE/$1/state"; die "fake backend: injected failure"; }
 	if [[ ${6:-} == stock ]]; then
@@ -41,7 +42,18 @@ backend_new() { # NAME CPUS MEM DISK USERDATA [SOURCE: VM@LABEL image | stock]
 	echo running >"$FAKE/$1/state"; cp "$5" "$FAKE/$1/user-data"; echo "$2 $3 $4" >"$FAKE/$1/size"
 	fake_checkpoint new "$1"
 }
-backend_list() { local d; for d in "$FAKE"/*/; do [[ -d $d ]] || continue; printf '%s\t%s\t%s\t%s\n' "$(basename "$d")" "$(cat "$d/state")" "127.0.0.1:$(cat "$d/port")" "1GiB"; done; }
+# Like the real backends: an ssh endpoint only while running; DISK_BYTES is the size the VM was given,
+# DISK_USED_BYTES a fixed 512 MiB.
+backend_list() {
+	local d st ssh g
+	for d in "$FAKE"/*/; do
+		[[ -d $d ]] || continue
+		st=$(cat "$d/state") ssh="" g=""
+		[[ $st != running ]] || ssh="127.0.0.1:$(cat "$d/port")"
+		[[ ! -f $d/size ]] || read -r _ _ g <"$d/size" || true
+		printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$d")" "$st" "$ssh" "${g:+$((g * 1073741824))}" 536870912
+	done
+}
 backend_ssh_endpoint() { backend_exists "$1" || die "no such vm: $1"; [[ $(cat "$FAKE/$1/state") == running ]] || die "$1 is not running"; echo "127.0.0.1 $(fake_port "$1")"; }
 backend_wait_endpoint() { echo "127.0.0.1 $(fake_port "$1")"; }
 # BOXERY_FAKE_DAEMON: leave a background process behind, as limactl start does with its hostagent

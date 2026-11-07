@@ -7,15 +7,24 @@
 //   /ollama/*  -> http://127.0.0.1:11434/*            (no auth)
 //   /edge/<token>/<host>/*  -> https://<host>/*       (headers granted to this VM: `boxery grant VM http:HOST`)
 //
+// LLM routes are deny-by-default: a VM may use a provider only while it holds an `llm:PROVIDER` grant
+// (`boxery grant VM llm:chatgpt`), listed in $CONF/edge/NAME.json as {"llm": ["chatgpt", …]}.
+//
 // Auth from VM: "Authorization: Bearer <token>" or "x-api-key: <token>".
 // <token> is "name:secret" or a JWT-shaped string whose payload carries {"boxery":"name:secret"}
 // (the Codex client derives the account id from a JWT, so we hand it a fake one).
+import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+/** @import { IncomingMessage, ServerResponse } from "node:http" */
+/** @import { ReadableStream as NodeReadableStream } from "node:stream/web" */
+
+/** An authenticated VM: its name, its pool lease (null for a pet), and how the log names it. @typedef {{ vm: string, lease: string | null, tag: string }} Who */
+/** @typedef {{ base: string, auth(h: Headers): Promise<void> }} Route */
 
 const CONF = process.env.BOXERY_CONF ?? path.join(os.homedir(), ".config/boxery");
 const TOKENS = path.join(CONF, "tokens.json");
@@ -35,19 +44,36 @@ function loadEnvFile() {
 }
 loadEnvFile();
 
+/** @type {{ key: string, tokens: Record<string, any> } | null} */
+let tokensCache = null;
+/** tokens.json: NAME → "secret" | {secret, lease} (parsed JSON, unchecked). Parsed again only when the
+ * file changes: a stat per request (inode, size, ns mtime/ctime) instead of a read and parse, so a
+ * revocation (the host renames a new file into place) still counts from the very next request.
+ * @returns {Record<string, any>} */
 function readTokens() {
 	try {
-		return JSON.parse(fs.readFileSync(TOKENS, "utf8"));
+		const st = fs.statSync(TOKENS, { bigint: true });
+		const key = `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+		if (tokensCache?.key !== key) tokensCache = { key, tokens: JSON.parse(fs.readFileSync(TOKENS, "utf8")) };
+		return tokensCache.tokens;
 	} catch {
+		tokensCache = null;
 		return {};
 	}
 }
 
+/** @param {string} s @returns {any} */
 function b64urlJson(s) {
 	return JSON.parse(Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
 }
 
-/** "name:secret" → VM name if it matches tokens.json, else null. */
+const sha256 = (/** @type {string} */ s) => createHash("sha256").update(s).digest();
+/** Constant-time string compare: equal-length digests, so neither the length nor the content leaks through timing. */
+const secretEquals = (/** @type {unknown} */ got, /** @type {unknown} */ want) => typeof got === "string" && typeof want === "string" && timingSafeEqual(sha256(got), sha256(want));
+
+/** "name:secret" → {vm, lease, tag} if it matches tokens.json, else null. A tokens.json entry is the
+ * pet's "secret", or {secret, lease} for a pool VM: that token lives exactly as long as the lease.
+ * @param {unknown} cred @returns {Who | null} */
 function vmForCred(cred) {
 	if (typeof cred !== "string") return null;
 	const i = cred.indexOf(":");
@@ -55,12 +81,16 @@ function vmForCred(cred) {
 	const name = cred.slice(0, i);
 	const secret = cred.slice(i + 1);
 	const tokens = readTokens();
-	return Object.hasOwn(tokens, name) && secret && tokens[name] === secret ? name : null;
+	const entry = Object.hasOwn(tokens, name) ? tokens[name] : undefined;
+	const want = typeof entry === "string" ? entry : entry?.secret;
+	if (!secret || !want || !secretEquals(secret, want)) return null;
+	const lease = typeof entry?.lease === "string" ? entry.lease : null;
+	return { vm: name, lease, tag: lease ? `${name}/${lease}` : name }; // tag: who, in the log
 }
 
-/** Returns the VM name for a valid token, else null. */
+/** Returns {vm, lease, tag} for a valid token, else null. @param {IncomingMessage} req */
 function authenticate(req) {
-	let raw = req.headers["x-api-key"] ?? "";
+	let raw = /** @type {string} */ (req.headers["x-api-key"] ?? ""); // node joins repeated custom headers
 	const authz = req.headers.authorization ?? "";
 	if (authz.toLowerCase().startsWith("bearer ")) raw = authz.slice(7).trim();
 	if (!raw) return null;
@@ -78,7 +108,9 @@ function authenticate(req) {
 }
 
 // ---- Codex OAuth (shared with host pi's auth.json) ----
+/** @type {Promise<any> | null} */
 let refreshing = null;
+/** pi's openai-codex credentials (parsed auth.json), refreshed when they are about to expire. @returns {Promise<any>} */
 async function codexCreds() {
 	const auth = JSON.parse(fs.readFileSync(PI_AUTH, "utf8"));
 	const c = auth["openai-codex"];
@@ -105,9 +137,14 @@ async function codexCreds() {
 }
 
 const HOP = new Set(["host", "connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection", "te", "trailer", "content-length"]);
+// Guest headers that never reach a provider: credentials (the route sets its own), and OpenAI's billing
+// headers, which pick the organization/project a multi-org key charges. Only the host chooses those
+// (OPENAI_ORG_ID / OPENAI_PROJECT_ID in proxy.env); a guest can't send its spend somewhere else.
+const GUEST_STRIP = new Set(["x-api-key", "chatgpt-account-id", "openai-organization", "openai-project"]);
 
 // Per-route allowlist of [METHOD, path regex] (path = after the route prefix). Requests outside it are
 // rejected before credentials are attached: VMs get inference, not account administration.
+/** @type {Record<string, Array<[string, RegExp]>>} */
 const ALLOW = {
 	chatgpt: [["POST", /^\/backend-api\/codex\/responses$/]],
 	openai: [
@@ -125,6 +162,7 @@ const ALLOW = {
 		["GET", /^\/api\/(tags|version)$/],
 	],
 };
+/** @param {string} route @param {string | undefined} method @param {string} p */
 export const allowed = (route, method, p) => (ALLOW[route] ?? []).some(([m, re]) => m === method && re.test(p));
 
 const LIMITS = {
@@ -132,8 +170,10 @@ const LIMITS = {
 	perVm: Number(process.env.BOXERY_PROXY_MAX_CONCURRENT ?? 8), // concurrent requests per VM
 	maxMs: Number(process.env.BOXERY_PROXY_MAX_MS ?? 30 * 60_000), // wall time per request
 };
+/** @type {Map<string, number>} */
 const active = new Map(); // vm → in-flight count
 
+/** @type {Record<string, Route>} */
 const routes = {
 	chatgpt: {
 		base: "https://chatgpt.com",
@@ -144,10 +184,12 @@ const routes = {
 		},
 	},
 	openai: {
-		base: "https://api.openai.com",
+		base: process.env.BOXERY_OPENAI_URL ?? "https://api.openai.com", // override for tests
 		async auth(h) {
 			if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set in proxy.env");
 			h.set("authorization", `Bearer ${process.env.OPENAI_API_KEY}`);
+			if (process.env.OPENAI_ORG_ID) h.set("openai-organization", process.env.OPENAI_ORG_ID);
+			if (process.env.OPENAI_PROJECT_ID) h.set("openai-project", process.env.OPENAI_PROJECT_ID);
 		},
 	},
 	anthropic: {
@@ -166,6 +208,7 @@ const routes = {
 	},
 };
 
+/** @param {...unknown} a */
 function log(...a) {
 	console.log(new Date().toISOString(), ...a);
 }
@@ -177,9 +220,10 @@ const server = http.createServer((req, res) => {
 		res.end();
 	});
 });
+/** @param {IncomingMessage} req @param {ServerResponse} res */
 async function handle(req, res) {
 	const started = Date.now();
-	const url = new URL(req.url, "http://x");
+	const url = new URL(/** @type {string} */ (req.url), "http://x");
 	if (url.pathname === "/healthz") return res.end("ok\n");
 	const [, routeName, ...rest] = url.pathname.split("/");
 	if (routeName === "edge") return handleEdge(req, res, url, rest, started);
@@ -188,18 +232,24 @@ async function handle(req, res) {
 		res.writeHead(404).end("unknown route\n");
 		return;
 	}
-	const vm = authenticate(req);
-	if (!vm) {
+	const who = authenticate(req);
+	if (!who) {
 		res.writeHead(401, { "content-type": "application/json" }).end('{"error":"invalid boxery token"}\n');
 		log("401", req.method, url.pathname);
+		return;
+	}
+	if (!llmGranted(who.vm, who.lease, routeName)) {
+		res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: `llm:${routeName} is not granted to this VM (boxery grant ${who.vm} llm:${routeName})` }) + "\n");
+		log(who.tag, "403", "not granted", routeName);
 		return;
 	}
 	const subpath = "/" + rest.join("/");
 	if (!allowed(routeName, req.method, subpath)) {
 		res.writeHead(403, { "content-type": "application/json" }).end(`{"error":"not an allowed inference endpoint: ${req.method} /${routeName}${subpath.replace(/["\\]/g, "")}"}\n`);
-		log(vm, "403", req.method, routeName, subpath);
+		log(who.tag, "403", req.method, routeName, subpath);
 		return;
 	}
+	const { vm } = who;
 	const len = Number(req.headers["content-length"] ?? 0);
 	if (len > LIMITS.maxBody) {
 		res.writeHead(413).end("request body too large\n");
@@ -220,12 +270,10 @@ async function handle(req, res) {
 	});
 	try {
 		const h = new Headers();
-		for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && v != null) h.set(k, Array.isArray(v) ? v.join(", ") : v);
-		h.delete("x-api-key");
-		h.delete("chatgpt-account-id");
+		for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !GUEST_STRIP.has(k) && v != null) h.set(k, Array.isArray(v) ? v.join(", ") : v);
 		await route.auth(h);
 		const target = `${route.base}${subpath}${url.search}`;
-		const hasBody = !["GET", "HEAD"].includes(req.method);
+		const hasBody = !["GET", "HEAD"].includes(/** @type {string} */ (req.method));
 		let seen = 0;
 		const body = hasBody
 			? Readable.toWeb(
@@ -240,21 +288,23 @@ async function handle(req, res) {
 					),
 				)
 			: undefined;
-		const up = await fetch(target, { method: req.method, headers: h, body, duplex: hasBody ? "half" : undefined, redirect: "manual", signal: ac.signal });
+		// RequestInit's types lack `duplex` (required by Node's fetch for a streamed body).
+		const up = await fetch(target, /** @type {RequestInit} */ ({ method: req.method, headers: h, body, duplex: hasBody ? "half" : undefined, redirect: "manual", signal: ac.signal }));
+		/** @type {Record<string, string>} */
 		const outHeaders = {};
 		up.headers.forEach((v, k) => {
 			if (!HOP.has(k) && k !== "content-encoding") outHeaders[k] = v;
 		});
 		res.writeHead(up.status, outHeaders);
 		// pipeline respects backpressure from slow guests and tears down both sides on error/abort
-		if (up.body) await pipeline(Readable.fromWeb(up.body), res);
+		if (up.body) await pipeline(Readable.fromWeb(/** @type {NodeReadableStream} */ (up.body)), res);
 		else res.end();
 		done = true;
-		log(vm, req.method, routeName, subpath, up.status, `${Date.now() - started}ms`);
-	} catch (e) {
+		log(who.tag, req.method, routeName, subpath, up.status, `${Date.now() - started}ms`);
+	} catch (/** @type {any} */ e) {
 		const msg = ac.signal.aborted ? String(ac.signal.reason?.message ?? "aborted") : e.message;
 		// Clients often close a stream once they have the final event; that's not an error.
-		log(vm, msg === "client disconnected" ? "closed-by-client" : "ERROR", req.method, routeName, subpath, `${Date.now() - started}ms`, msg === "client disconnected" ? "" : msg);
+		log(who.tag, msg === "client disconnected" ? "closed-by-client" : "ERROR", req.method, routeName, subpath, `${Date.now() - started}ms`, msg === "client disconnected" ? "" : msg);
 		if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
 		if (!res.writableEnded) res.end(JSON.stringify({ error: msg }) + "\n");
 	} finally {
@@ -273,31 +323,50 @@ const EDGE_MAX_BODY = Number(process.env.BOXERY_PROXY_EDGE_MAX_BODY ?? 1024 * 10
 export const EDGE_HOST_RE = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,63}$/;
 const EDGE_STRIP = new Set(["authorization", "proxy-authorization", "cookie", "x-api-key"]);
 
-function edgeRoutes(vm) {
+/** VM's edge file, if it was set for this token's lease (a pool VM's file carries the lease id): its
+ *  http routes and llm grants end with the lease.
+ *  @param {string} vm @param {string | null} lease @returns {Record<string, any>} {hosts, llm, lease} (unchecked JSON) */
+function edgeFile(vm, lease) {
 	try {
 		const j = JSON.parse(fs.readFileSync(path.join(EDGE_DIR, `${vm}.json`), "utf8"));
-		return j && typeof j.hosts === "object" ? j.hosts : {};
+		if (!j || typeof j !== "object" || (j.lease ?? null) !== lease) return {};
+		return j;
 	} catch {
 		return {};
 	}
 }
+/** @param {string} vm @param {string | null} lease @returns {Record<string, any>} HOST → {headers, readonly} (unchecked JSON) */
+function edgeRoutes(vm, lease) {
+	const { hosts } = edgeFile(vm, lease);
+	return hosts && typeof hosts === "object" && !Array.isArray(hosts) ? hosts : {};
+}
+/** Read on every request, so grants and revokes take effect without a restart. No file → nothing granted.
+ *  @param {string} vm @param {string | null} lease @param {string} provider */
+function llmGranted(vm, lease, provider) {
+	const { llm } = edgeFile(vm, lease);
+	return Array.isArray(llm) && llm.includes(provider);
+}
 
-/** Read-only routes allow fetching (incl. git clone/fetch) but nothing that changes state. */
+/** Read-only routes allow fetching (incl. git clone/fetch) but nothing that changes state.
+ *  @param {string | undefined} method @param {string} p @param {string} search */
 export function edgeReadAllowed(method, p, search) {
 	if (method === "GET" || method === "HEAD") return !/[?&]service=git-receive-pack(&|$)/.test(search);
 	return method === "POST" && p.endsWith("/git-upload-pack");
 }
 
+/** @param {IncomingMessage} req @param {ServerResponse} res @param {URL} url @param {string[]} rest @param {number} started */
 async function handleEdge(req, res, url, rest, started) {
 	const [rawTok, host, ...tail] = rest;
-	const vm = vmForCred(decodeURIComponent(rawTok ?? ""));
+	const who = vmForCred(decodeURIComponent(rawTok ?? ""));
+	const { vm, lease } = /** @type {Who} */ (who ?? {}); // used only once `who` is known
+	/** @param {number} code @param {string} msg */
 	const fail = (code, msg) => {
 		res.writeHead(code, { "content-type": "application/json" }).end(JSON.stringify({ error: msg }) + "\n");
-		log(vm ?? "-", "EDGE", code, req.method, host && EDGE_HOST_RE.test(host) ? host : "?", msg);
+		log(who?.tag ?? "-", "EDGE", code, req.method, host && EDGE_HOST_RE.test(host) ? host : "?", msg);
 	};
-	if (!vm) return fail(401, "invalid boxery token");
+	if (!who) return fail(401, "invalid boxery token");
 	if (!host || !EDGE_HOST_RE.test(host)) return fail(400, "bad host");
-	const route = edgeRoutes(vm)[host];
+	const route = edgeRoutes(vm, lease)[host];
 	if (!route || typeof route !== "object") return fail(403, `${host} is not granted to this VM (boxery grant ${vm} http:${host})`);
 	const subpath = "/" + tail.join("/");
 	if (route.readonly && !edgeReadAllowed(req.method, subpath, url.search)) return fail(403, `read-only grant: ${req.method} not allowed`);
@@ -322,7 +391,7 @@ async function handleEdge(req, res, url, rest, started) {
 		}
 		for (const [k, v] of inject) h.set(k, v);
 		const target = `${EDGE_UPSTREAM ?? `https://${host}`}${subpath}${url.search}`;
-		const hasBody = !["GET", "HEAD"].includes(req.method);
+		const hasBody = !["GET", "HEAD"].includes(/** @type {string} */ (req.method));
 		let seen = 0;
 		const body = hasBody
 			? Readable.toWeb(
@@ -337,7 +406,9 @@ async function handleEdge(req, res, url, rest, started) {
 					),
 				)
 			: undefined;
-		const up = await fetch(target, { method: req.method, headers: h, body, duplex: hasBody ? "half" : undefined, redirect: "manual", signal: ac.signal });
+		// RequestInit's types lack `duplex` (required by Node's fetch for a streamed body).
+		const up = await fetch(target, /** @type {RequestInit} */ ({ method: req.method, headers: h, body, duplex: hasBody ? "half" : undefined, redirect: "manual", signal: ac.signal }));
+		/** @type {Record<string, string>} */
 		const outHeaders = {};
 		up.headers.forEach((v, k) => {
 			if (!HOP.has(k) && k !== "content-encoding" && k !== "set-cookie") outHeaders[k] = v;
@@ -348,19 +419,19 @@ async function handleEdge(req, res, url, rest, started) {
 		if (loc) {
 			try {
 				const L = new URL(loc, `https://${host}${subpath}`);
-				const routes = edgeRoutes(vm);
+				const routes = edgeRoutes(vm, lease);
 				if (L.protocol === "https:" && !L.port && Object.hasOwn(routes, L.hostname))
 					outHeaders.location = `http://${req.headers.host ?? "127.0.0.1:8088"}/edge/${rawTok}/${L.hostname}${L.pathname}${L.search}`;
 			} catch {}
 		}
 		res.writeHead(up.status, outHeaders);
-		if (up.body && req.method !== "HEAD") await pipeline(Readable.fromWeb(up.body), res);
+		if (up.body && req.method !== "HEAD") await pipeline(Readable.fromWeb(/** @type {NodeReadableStream} */ (up.body)), res);
 		else res.end();
 		done = true;
-		log(vm, "EDGE", req.method, host, subpath, up.status, `${Date.now() - started}ms`);
-	} catch (e) {
+		log(who.tag, "EDGE", req.method, host, subpath, up.status, `${Date.now() - started}ms`);
+	} catch (/** @type {any} */ e) {
 		const msg = ac.signal.aborted ? String(ac.signal.reason?.message ?? "aborted") : e.message;
-		log(vm, msg === "client disconnected" ? "closed-by-client" : "ERROR", "EDGE", req.method, host, subpath, `${Date.now() - started}ms`, msg === "client disconnected" ? "" : msg);
+		log(who.tag, msg === "client disconnected" ? "closed-by-client" : "ERROR", "EDGE", req.method, host, subpath, `${Date.now() - started}ms`, msg === "client disconnected" ? "" : msg);
 		if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
 		if (!res.writableEnded) res.end(JSON.stringify({ error: msg }) + "\n");
 	} finally {

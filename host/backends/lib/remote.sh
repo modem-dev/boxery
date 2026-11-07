@@ -26,19 +26,20 @@ remote_port() { echo $((REMOTE_PORT_BASE + $(cat "$(remote_vm_dir "$1")/slot")))
 # Lowest free slot (1..REMOTE_MAX_SLOT), written to NAME's dir. Serialized: concurrent `new`s race here.
 remote_alloc_slot() { # NAME → slot
 	local lock=$REMOTE_DIR/.slot.lock i s used
-	for i in $(seq 300); do mkdir "$lock" 2>/dev/null && break; sleep 0.1; [[ $i == 300 ]] && die "slot lock held ($lock)"; done
+	for i in $(seq 300); do take_lock "$lock" && break; sleep 0.1; [[ $i == 300 ]] && die "slot lock held ($lock)"; done
 	used=" $(cat "$REMOTE_DIR"/vms/*/slot 2>/dev/null | tr '\n' ' ') "
 	for ((s = 1; s <= REMOTE_MAX_SLOT; s++)); do [[ $used == *" $s "* ]] || break; done
-	if ((s > REMOTE_MAX_SLOT)); then rmdir "$lock"; die "no free tunnel ports (max $REMOTE_MAX_SLOT VMs)"; fi
+	if ((s > REMOTE_MAX_SLOT)); then rm -f "$lock"; die "no free tunnel ports (max $REMOTE_MAX_SLOT VMs)"; fi
 	echo "$s" >"$(remote_vm_dir "$1")/slot"
-	rmdir "$lock"
+	rm -f "$lock"
 	echo "$s"
 }
 # The slot lock is held for milliseconds; one older than a minute belongs to a dead holder. A fresh one
 # may be a live `new`'s: leave it. (Crash recovery, backend_cleanup_new.)
 remote_clear_stale_slot_lock() {
 	local lock=$REMOTE_DIR/.slot.lock
-	if [[ -d $lock && -n $(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null) ]]; then rmdir "$lock" 2>/dev/null || true; fi
+	# -r: a lock left by an older boxery is a directory.
+	if [[ -e $lock && -n $(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null) ]]; then rm -rf "$lock"; fi
 }
 
 # ---------------------------------------------------------------- tunnels (supervised ssh)
@@ -80,14 +81,23 @@ remote_tunnel_write() {
 	fi
 }
 remote_plist() { echo "$HOME/Library/LaunchAgents/dev.$(remote_unit "$1").plist"; }
+# (Re)load a launch agent. bootout returns before launchd has removed the job, and a bootstrap in that
+# window fails with "5: Input/output error": wait for it to go (5 s at most), and retry a failed bootstrap.
+remote_launchd_reload() { # LABEL PLIST
+	local domain i
+	domain="gui/$(id -u)"
+	launchctl bootout "$domain/$1" >/dev/null 2>&1 || true
+	for ((i = 0; i < 50; i++)); do launchctl print "$domain/$1" >/dev/null 2>&1 || break; sleep 0.1; done
+	for ((i = 1; i < 5; i++)); do launchctl bootstrap "$domain" "$2" 2>/dev/null && return; sleep 0.5; done
+	launchctl bootstrap "$domain" "$2"
+}
 # Started tunnels are enabled (systemd) or installed in LaunchAgents (launchd), so they come back after
 # a host reboot; remote VMs keep running while the host is down.
 remote_tunnel_start() {
 	if [[ $REMOTE_SUPERVISOR == launchd ]]; then
 		mkdir -p "$HOME/Library/LaunchAgents"
 		cp "$(remote_vm_dir "$1")/tunnel.plist" "$(remote_plist "$1")"
-		launchctl bootout "gui/$(id -u)/dev.$(remote_unit "$1")" >/dev/null 2>&1 || true
-		launchctl bootstrap "gui/$(id -u)" "$(remote_plist "$1")" || die "starting the tunnel to $1 failed"
+		remote_launchd_reload "dev.$(remote_unit "$1")" "$(remote_plist "$1")" || die "starting the tunnel to $1 failed"
 	else
 		systemctl --user enable "$(remote_unit "$1").service" >/dev/null 2>&1 || die "enabling the tunnel to $1 failed"
 		# restart, not start: reimage and start rewrite tunnel.sh for a running unit
@@ -183,7 +193,7 @@ remote_build_script() { # POST_FN OK_MARKER [EXTRA_PRE_COMMAND…] → script on
 	echo 'set -e'
 	echo 'id agent >/dev/null 2>&1 || useradd -m -s /bin/bash -c "boxery agent" -G sudo,adm agent'
 	echo 'echo "agent ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/90-boxery-agent; chmod 440 /etc/sudoers.d/90-boxery-agent'
-	node "$ROOT/host/cloudconfig-sh.mjs" "$BASE_USERDATA" || return 1
+	"${BOXERY_NODE:-node}" "$ROOT/host/cloudconfig-sh.mjs" "$BASE_USERDATA" || return 1
 	echo 'cat >/usr/local/sbin/boxery-remote-post.sh <<'"'"'BOXERY_POST'"'"
 	"$post"
 	echo 'BOXERY_POST'
@@ -251,20 +261,26 @@ remote_hostname_restore() {
 #                    the platform gives every machine its own and pins it through its API (boat.dev)
 remote_identity_script() { # USERDATA NAME BOOT_SCRIPT HOST_KEYS
 	echo 'set -e'
-	node "$ROOT/host/cloudconfig-sh.mjs" "$1" || return 1
+	"${BOXERY_NODE:-node}" "$ROOT/host/cloudconfig-sh.mjs" "$1" || return 1
 	echo 'install -d -m 700 -o agent -g agent /home/agent/.ssh'
 	echo "cat >/home/agent/.ssh/authorized_keys <<'BOXERY_KEYS'"
 	awk '/^ssh_authorized_keys:/{f=1;next} f&&/^  - /{sub(/^  - /,""); gsub(/^"|"$/,""); print; next} f{f=0}' "$1"
 	echo 'BOXERY_KEYS'
 	echo 'chown agent:agent /home/agent/.ssh/authorized_keys; chmod 600 /home/agent/.ssh/authorized_keys'
 	echo 'rm -f /etc/machine-id /var/lib/dbus/machine-id; systemd-machine-id-setup >/dev/null 2>&1'
-	if [[ $4 == regen ]]; then echo 'rm -f /etc/ssh/ssh_host_*; ssh-keygen -A >/dev/null; systemctl restart ssh.service'; fi
+	# The pinned host key boxery-host put in the user-data (host/hostkeys.mjs) was written above with the
+	# other files; sshd must pick it up. Without one (boat: the platform's key is pinned), regenerate the
+	# copied disk's own keys unless the platform gives every machine its own.
+	if grep -q '^  - path: /etc/ssh/boxery_host_ed25519_key$' "$1"; then echo 'rm -f /etc/ssh/ssh_host_*; ssh-keygen -A >/dev/null; systemctl restart ssh.service'
+	elif [[ $4 == regen ]]; then echo 'rm -f /etc/ssh/ssh_host_*; ssh-keygen -A >/dev/null; systemctl restart ssh.service'; fi
 	# Hostname (and /etc/hosts), now and at every boot: the platform resets them.
 	printf 'mkdir -p /etc/boxery; echo %q >/etc/boxery/hostname; %s\n' "$2" "$3"
 	echo 'rm -rf /run/user/*/boxery'
 	echo 'chown -R agent:agent /home/agent'
 	echo 'systemctl restart boxery-llm.service'
 	echo 'uid=$(id -u agent); systemctl start "user@$uid.service"'
-	echo "sudo -u agent bash -lc 'git config --global user.name agent; git config --global user.email agent@boxery; git config --global init.defaultBranch main; mkdir -p ~/project && cd ~/project && { [ -d .git ] || git init -q; }'"
+	# From agent's home: the script runs in the admin user's, and git reads the .git it finds there
+	# (exeuntu's /home/exedev/.git, which agent can't read, makes every git config fail).
+	echo "sudo -u agent bash -lc 'cd && git config --global user.name agent; git config --global user.email agent@boxery; git config --global init.defaultBranch main; mkdir -p ~/project && cd ~/project && { [ -d .git ] || git init -q; }'"
 	echo '[ -e /etc/boxery/headless ] || sudo -u agent XDG_RUNTIME_DIR=/run/user/$uid systemctl --user start boxery-vnc boxery-desktop boxery-novnc || true'
 }

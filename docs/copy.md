@@ -1,12 +1,14 @@
-# File transfers with `vm_copy`
+# File transfers with `vm_copy` and `boxery cp`
 
 ← [Docs](README.md)
+
+`boxery cp FROM TO` is the same code from the CLI, with the same locations, except that a bare path is local there (the CLI has no current VM). See the [CLI reference](cli.md#files).
 
 `vm_copy` transfers a file or directory **when explicitly called**. It does not continuously synchronize workspaces, and ordinary shell/file/browser tools do not copy the project back and forth. VM forks use a separate disk-image mechanism.
 
 ## Locations
 
-- `local:/path`: the machine running the tools/MCP server, not necessarily your laptop.
+- `local:/path`: the machine running the tools/MCP server, not necessarily your laptop. An HTTP MCP server refuses `local:` unless started with `--copy-root DIR`, which confines it to `DIR` ([MCP server](mcp.md#b-streamable-http-on-the-host-over-tailscale)).
 - `VM:/path`: a VM on the selected host.
 - `HOST/VM:/path`: an explicit named host and VM.
 - A bare path: the current VM.

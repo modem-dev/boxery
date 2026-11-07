@@ -1,17 +1,30 @@
 // Streaming tar transfers. Endpoints are already resolved/pinned by the caller:
-// {path, vm?, sshConf?, label}. No host registry or ambient "current VM" reads here.
+// {path, vm?, sshConf?, label, confine?}. No host registry or ambient "current VM" reads here.
+// A local destination with confine(realPath) (throws to refuse) is confined: see commitConfined.
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { q } from "./shell.mjs";
+/** @import { ChildProcessByStdio } from "node:child_process" */
+/** @import { Readable, Writable } from "node:stream" */
+/** @import { CopyEndpoint } from "./boxery-core.mjs" */
+/**
+ * A spawned process group we own (see ownedMembers). done settles on close; members maps an observed
+ * member pid to its start time (the identity a later signal must match).
+ * @typedef {{ child: ChildProcessByStdio<Writable | null, Readable, Readable>, running: boolean, members: Map<number, string>, stderr: Buffer, label: string,
+ *   done: Promise<void>, exitCode?: number | null, exitSignal?: NodeJS.Signals | null, failure?: Error, stopError?: Error, groupFinished?: boolean, leaderStart?: string }} Worker
+ */
+/** A staging directory on a VM, removed after the copy. @typedef {{ control: string, endpoint: CopyEndpoint, preparationUnverified?: boolean }} RemoteStage */
+/** @typedef {RemoteStage | { control: string, endpoint?: undefined, preparationUnverified?: undefined }} Stage */
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const delay = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const aborted = () => Object.assign(new Error("copy aborted"), { name: "AbortError" });
-const sshArgs = (endpoint, script) => ["-F", endpoint.sshConf, "-o", "BatchMode=yes", "-o", "ControlMaster=no", `${endpoint.vm}.boxery`, `bash -c ${q(script)}`];
+const sshArgs = (/** @type {CopyEndpoint} */ endpoint, /** @type {string} */ script) => ["-F", /** @type {string} */ (endpoint.sshConf), "-o", "BatchMode=yes", "-o", "ControlMaster=no", `${endpoint.vm}.boxery`, `bash -c ${q(script)}`];
 
+/** @param {number} group */
 function groupMembers(group) {
 	const result = spawnSync("ps", ["-eo", "pid=,pgid=,stat=,lstart="], {
 		encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 5000,
@@ -24,6 +37,7 @@ function groupMembers(group) {
 			? [{ pid: Number(pid), started: started.join(" ") }] : [];
 	});
 }
+/** @param {Worker} worker @param {{ initial?: boolean, exiting?: boolean }} [opts] */
 function ownedMembers(worker, { initial = false, exiting = false } = {}) {
 	if (!worker.child.pid || worker.groupFinished) return [];
 	const members = groupMembers(worker.child.pid);
@@ -43,9 +57,10 @@ function ownedMembers(worker, { initial = false, exiting = false } = {}) {
 	else worker.stopError = new Error("cannot verify remaining process-group ownership");
 	return [];
 }
+/** @param {string} file @param {string[]} args @param {{ input?: boolean, output?: boolean, env?: NodeJS.ProcessEnv, label?: string }} [opts] */
 function childProcess(file, args, { input = false, output = false, env = process.env, label = file } = {}) {
-	const child = spawn(file, args, { env, detached: true, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
-	const worker = { child, running: !!child.pid, members: new Map(), stderr: Buffer.alloc(0), label };
+	const child = /** @type {Worker["child"]} */ (spawn(file, args, { env, detached: true, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] }));
+	const worker = /** @type {Worker} */ ({ child, running: !!child.pid, members: new Map(), stderr: Buffer.alloc(0), label });
 	ownedMembers(worker, { initial: true });
 	child.on("exit", (code, signal) => {
 		worker.exitCode = code; worker.exitSignal = signal;
@@ -56,7 +71,7 @@ function childProcess(file, args, { input = false, output = false, env = process
 		worker.stderr = Buffer.concat([worker.stderr, chunk]).subarray(-64 * 1024);
 	});
 	if (!output) child.stdout.resume();
-	worker.done = new Promise((resolve, reject) => {
+	worker.done = new Promise((/** @type {(value?: void) => void} */ resolve, reject) => {
 		child.on("error", (e) => { worker.failure = new Error(`${label}: ${e.message}`); reject(worker.failure); });
 		child.on("close", (code, signal) => {
 			worker.running = false;
@@ -68,21 +83,23 @@ function childProcess(file, args, { input = false, output = false, env = process
 	worker.done.catch(() => {}); // a peer may fail before Promise.all attaches
 	return worker;
 }
+/** @param {Worker} worker @param {NodeJS.Signals} signal */
 function kill(worker, signal) {
 	const members = ownedMembers(worker);
 	if (!members.length) return false;
-	try { process.kill(-worker.child.pid, signal); }
-	catch (e) {
+	try { process.kill(-/** @type {number} */ (worker.child.pid), signal); }
+	catch (/** @type {any} */ e) {
 		if (e.code === "EPERM") {
 			// Darwin can reject killpg during teardown even when owned members are signalable.
 			for (const member of members) {
 				try { process.kill(member.pid, signal); }
-				catch (error) { if (error.code !== "ESRCH") worker.stopError = error; }
+				catch (/** @type {any} */ error) { if (error.code !== "ESRCH") worker.stopError = error; }
 			}
 		} else if (e.code !== "ESRCH") worker.stopError = e;
 	}
 	return true;
 }
+/** @param {Worker[]} workers */
 async function terminate(workers) {
 	// Group lifetime is independent of child/stdio close. A closed leader may still have
 	// TERM-ignoring descendants with no inherited descriptors; those need KILL as well.
@@ -95,13 +112,16 @@ async function terminate(workers) {
 
 // Metadata calls are bounded, but not interrupted mid-prepare by the user's signal: wait for
 // directory creation to finish before cleanup. The payload workers ARE immediately cancellable.
+/** @param {Worker} worker */
 function releaseDescriptors(worker) {
 	worker.child.stdin?.destroy(); worker.child.stdout.destroy(); worker.child.stderr.destroy();
 	worker.child.unref();
 }
+/** @param {CopyEndpoint} endpoint @param {string} script @param {string} label @returns {Promise<string>} */
 async function metadata(endpoint, script, label, timeout = 30_000) {
 	const worker = childProcess("ssh", sshArgs(endpoint, script), { label, output: true });
-	const chunks = []; let bytes = 0, timer, error;
+	/** @type {Buffer[]} */
+	const chunks = []; let bytes = 0, /** @type {NodeJS.Timeout | undefined} */ timer, /** @type {any} */ error;
 	worker.child.stdout.on("data", (chunk) => {
 		bytes += chunk.length;
 		if (bytes <= 64 * 1024) chunks.push(chunk);
@@ -132,6 +152,7 @@ async function metadata(endpoint, script, label, timeout = 30_000) {
 	return Buffer.concat(chunks).toString("utf8");
 }
 
+/** @param {CopyEndpoint} endpoint @param {string} control @param {string} command @param {Parameters<typeof childProcess>[2]} [options] */
 function remoteWorker(endpoint, control, command, options) {
 	// Publish the process-group identity atomically BEFORE touching the archive. Cleanup renames
 	// the control directory first. A late starter then cannot publish and must exit without work.
@@ -145,6 +166,7 @@ function remoteWorker(endpoint, control, command, options) {
 	const script = `setsid -w bash -c ${q(inner)}`;
 	return childProcess("ssh", sshArgs(endpoint, script), options);
 }
+/** @param {RemoteStage} stage */
 async function cleanRemote(stage, timeout = 15_000) {
 	const c = q(stage.control), tomb = q(`${stage.control}.cleanup`);
 	const live = '$2 == g && $3 !~ /^[ZX]/ { found=1 } END { exit !found }';
@@ -169,16 +191,18 @@ async function cleanRemote(stage, timeout = 15_000) {
 		`[ "$failed" -eq 0 ]; fi`;
 	await metadata(stage.endpoint, script, `cleanup ${stage.endpoint.label}`, timeout);
 }
+/** @param {string} control */
 async function cleanLocal(control) {
 	try { await rm(control, { recursive: true, force: true }); }
-	catch (error) {
+	catch (/** @type {any} */ error) {
 		if (!["EACCES", "EPERM"].includes(error.code)) throw error;
 		// tar restores directory modes. Make only our staged directories traversable/writable,
 		// before descending; do not chmod files/hardlinks or follow archived symlinks.
+		/** @param {string} directory @returns {Promise<void>} */
 		const writableDirectories = async (directory) => {
 			let info;
 			try { info = await lstat(directory); }
-			catch (e) { if (e.code === "ENOENT") return; throw e; }
+			catch (/** @type {any} */ e) { if (e.code === "ENOENT") return; throw e; }
 			if (!info.isDirectory()) return;
 			await chmod(directory, 0o700);
 			for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -192,29 +216,79 @@ async function cleanLocal(control) {
 
 // tar may finish after its two EOF blocks, before the producer's final record padding.
 // Drain that padding on SUCCESS so an otherwise valid transfer cannot fail with EPIPE.
-const extractScript = (data) => `if (cd ${q(data)} && tar -xf -); then cat >/dev/null; else exit $?; fi`;
+const extractScript = (/** @type {string} */ data) => `if (cd ${q(data)} && tar -xf -); then cat >/dev/null; else exit $?; fi`;
+/** @param {string} destination @param {string} data @param {string} basename */
 const commitScript = (destination, data, basename) =>
 	`set -e; d=${q(destination)}; t=${q(data)}; ` +
 	`if [ -d "$d" ]; then cp -a "$t"/${q(basename)} "$d"/; ` +
 	`else mkdir -p "$(dirname "$d")"; mv "$t"/${q(basename)} "$d"; fi`;
 
+const lstatOrNull = (/** @type {string} */ p) => lstat(p).catch((e) => { if (e.code === "ENOENT") return null; throw e; });
+
+/** Refuse a staged tree with a hard link to a file outside it (tar refuses most; this is the backstop). @param {string} top */
+async function assertSelfContained(top) {
+	/** @type {Map<string, { nlink: number, count: number }>} */
+	const links = new Map();
+	/** @param {string} p @returns {Promise<void>} */
+	const walk = async (p) => {
+		const st = await lstat(p);
+		if (st.isDirectory()) {
+			for (const name of await readdir(p)) await walk(path.join(p, name));
+		} else if (st.nlink > 1) {
+			const key = `${st.dev}:${st.ino}`;
+			const seen = links.get(key) ?? { nlink: st.nlink, count: 0 };
+			seen.count++;
+			links.set(key, seen);
+		}
+	};
+	await walk(top);
+	if ([...links.values()].some((l) => l.count < l.nlink)) throw new Error("the archive hard-links a file outside the copy");
+}
+
+/**
+ * Commit a confined local copy. tar has extracted into our own staging directory, which refuses
+ * absolute and ".." entries and symlink traversal within the archive. What remains is the existing
+ * destination tree: `cp -a` into an existing directory would follow a symlink planted there by an
+ * earlier copy. So never merge: rename(2) the staged entry into place (it replaces a final symlink
+ * rather than following it), only onto nothing or onto a non-directory, after re-checking the real
+ * path of its parent.
+ * @param {CopyEndpoint & { confine: (real: string) => void }} destination @param {string} data @param {string} basename
+ */
+async function commitConfined(destination, data, basename) {
+	const staged = path.join(data, basename);
+	const incoming = await lstat(staged);
+	await assertSelfContained(staged);
+	let target = destination.path;
+	let existing = await lstatOrNull(target);
+	if (existing?.isDirectory()) {
+		target = path.join(target, basename);
+		existing = await lstatOrNull(target);
+	}
+	if (existing && (existing.isDirectory() || incoming.isDirectory()))
+		throw new Error(`local:${target} already exists; a confined local copy doesn't merge into or replace a directory: copy to a new path`);
+	destination.confine(path.join(await realpath(path.dirname(target)), path.basename(target)));
+	await rename(staged, target);
+}
+
+/** @param {CopyEndpoint} source @param {CopyEndpoint} destination @param {{ signal?: AbortSignal, metadataTimeoutMs?: number, cleanupTimeoutMs?: number }} [opts] */
 export async function streamCopy(source, destination, { signal, metadataTimeoutMs = 30_000, cleanupTimeoutMs = 15_000 } = {}) {
 	if (signal?.aborted) throw aborted();
 	const basename = path.posix.basename(source.path);
 	if (!basename) throw new Error("cannot copy the filesystem root");
 	const id = randomBytes(12).toString("hex");
-	const stages = [], workers = [];
+	const stages = /** @type {Stage[]} */ ([]), workers = /** @type {Worker[]} */ ([]);
 	const transfer = new AbortController();
-	let bytes = 0, failure;
+	let bytes = 0, /** @type {any} */ failure;
 	const onAbort = () => {
 		transfer.abort();
 		for (const w of workers) kill(w, "SIGTERM");
 	};
 	signal?.addEventListener("abort", onAbort, { once: true });
 	const check = () => { if (signal?.aborted) throw aborted(); };
+	/** @param {CopyEndpoint} endpoint @param {string} script @param {RemoteStage[]} pending */
 	const prepare = async (endpoint, script, pending) => {
 		try { return await metadata(endpoint, script, `prepare ${endpoint.label}`, metadataTimeoutMs); }
-		catch (error) {
+		catch (/** @type {any} */ error) {
 			// A lost SSH client/status cannot prove that a remote mkdir stopped. Even an
 			// absent directory during cleanup does not rule out a late queued preparation.
 			if (error.remoteUnverified) for (const stage of pending) stage.preparationUnverified = true;
@@ -249,11 +323,13 @@ export async function streamCopy(source, destination, { signal, metadataTimeoutM
 		} else {
 			let directory = false;
 			try { directory = (await stat(destination.path)).isDirectory(); }
-			catch (e) { if (!["ENOENT", "ENOTDIR"].includes(e.code)) throw e; }
+			catch (/** @type {any} */ e) { if (!["ENOENT", "ENOTDIR"].includes(e.code)) throw e; }
 			const parent = directory ? destination.path : path.dirname(destination.path);
 			await mkdir(parent, { recursive: true });
 			destinationControl = await mkdtemp(path.join(parent, ".boxery-copy-"));
 			stages.push({ control: destinationControl });
+			// Confined: the path was checked before; make sure we did not stage through a link swapped in since.
+			destination.confine?.(await realpath(destinationControl));
 			await mkdir(path.join(destinationControl, "data"));
 		}
 		check();
@@ -267,7 +343,7 @@ export async function streamCopy(source, destination, { signal, metadataTimeoutM
 		// cd in the shell too: GNU tar also unquotes its -C argument.
 		const sourceScript = `export COPYFILE_DISABLE=1; cd ${q(path.posix.dirname(source.path))} && printf '%s\\000' ${q(basename)} | tar ${sourceArgs.map(q).join(" ")}`;
 		const producer = source.vm
-			? remoteWorker(source, sourceControl, sourceScript, { output: true, label: `read ${source.label}` })
+			? remoteWorker(source, /** @type {string} */ (sourceControl), sourceScript, { output: true, label: `read ${source.label}` })
 			: childProcess("sh", ["-c", sourceScript], { output: true, label: `read ${source.path}`, env: { ...process.env, COPYFILE_DISABLE: "1" } });
 		workers.push(producer);
 		const consumer = destination.vm
@@ -275,17 +351,20 @@ export async function streamCopy(source, destination, { signal, metadataTimeoutM
 			: childProcess("sh", ["-c", extractScript(data)], { input: true, label: `extract ${destination.path}` });
 		workers.push(consumer);
 		const counter = new Transform({ transform(chunk, _encoding, callback) { bytes += chunk.length; callback(null, chunk); } });
-		const pump = pipeline(producer.child.stdout, counter, consumer.child.stdin, { signal: transfer.signal });
+		const pump = pipeline(producer.child.stdout, counter, /** @type {Writable} */ (consumer.child.stdin), { signal: transfer.signal });
 		await Promise.all([producer.done, consumer.done, pump]);
 		check();
 		// EOF alone is not success: a producer can emit a valid tar and STILL exit nonzero.
 		// Commit only after BOTH process statuses and the stream pipeline have succeeded.
-		const script = commitScript(destination.path, data, basename);
-		const commit = destination.vm
-			? remoteWorker(destination, destinationControl, script, { label: `commit ${destination.label}` })
-			: childProcess("sh", ["-c", script], { label: `commit ${destination.path}` });
-		workers.push(commit);
-		await commit.done;
+		if (destination.confine && !destination.vm) await commitConfined(/** @type {Parameters<typeof commitConfined>[0]} */ (destination), data, basename);
+		else {
+			const script = commitScript(destination.path, data, basename);
+			const commit = destination.vm
+				? remoteWorker(destination, destinationControl, script, { label: `commit ${destination.label}` })
+				: childProcess("sh", ["-c", script], { label: `commit ${destination.path}` });
+			workers.push(commit);
+			await commit.done;
+		}
 		check();
 	} catch (e) {
 		failure = e;
@@ -293,12 +372,12 @@ export async function streamCopy(source, destination, { signal, metadataTimeoutM
 		signal?.removeEventListener("abort", onAbort);
 		transfer.abort();
 		await terminate(workers);
-		const cleanupErrors = workers.filter((w) => w.stopError).map((w) => `${w.label}: ${w.stopError.message}`);
+		const cleanupErrors = workers.filter((w) => w.stopError).map((w) => `${w.label}: ${/** @type {Error} */ (w.stopError).message}`);
 		for (const stage of stages.reverse()) {
 			try {
 				if (stage.endpoint) await cleanRemote(stage, cleanupTimeoutMs);
 				else await cleanLocal(stage.control);
-			} catch (e) { cleanupErrors.push(e.message); }
+			} catch (/** @type {any} */ e) { cleanupErrors.push(e.message); }
 			if (stage.preparationUnverified) cleanupErrors.push(`prepare ${stage.endpoint.label}: completion unverified; late staging may remain`);
 		}
 		// Cleanup above terminates remote groups even if their SSH clients were killed first.

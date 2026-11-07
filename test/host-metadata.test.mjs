@@ -28,14 +28,14 @@ function fixture() {
 		writeFileSync(path.join(d, "ssh_config"), "# fake\n");
 	}
 	writeFileSync(pointer, `${profile}\n`);
-	const env = { ...process.env, HOME: path.join(dir, "home"), BOXERY_HOME: home, BOXERY_BIN: CLI, BOXERY_HOST: "", BOXERY_HOST_BIN: "" };
+	const env = { ...process.env, HOME: path.join(dir, "home"), BOXERY_HOME: home };
 	const run = (bin, args) => {
 		const r = spawnSync(bin, args, { env, encoding: "utf8", timeout: 3000 });
 		assert.ifError(r.error); // A blocked read (e.g. FIFO) is not a successful rejection.
 		return r;
 	};
 	const cli = (args) => run(CLI, args);
-	const core = (host) => run(process.execPath, ["--input-type=module", "-e", `import * as c from ${JSON.stringify(CORE)}; await c.withHost(c.resolveHost(${JSON.stringify(host)}), () => c.boxeryCli(['ls']));`]);
+	const core = (host) => run(process.execPath, ["--input-type=module", "-e", `import * as c from ${JSON.stringify(CORE)}; await c.withHost(c.resolveHost(${JSON.stringify(host)}), () => c.listVms());`]);
 	return { dir, home, profile, pointer, selected, log, cli, core, run, close: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -63,12 +63,15 @@ function rejected(f, file, operations) {
 test("CLI/core reject non-regular, symlink and unreadable defaults without routing or repairing them", () => {
 	const f = fixture();
 	try {
-		// A missing default remains the only automatic legacy fallback.
-		assert.equal(f.cli(["ls"]).status, 0);
-		assert.equal(f.core().status, 0);
-		rmSync(f.log);
+		// A missing default selects no host: nothing is routed anywhere.
+		const none = f.cli(["ls"]);
+		assert.notEqual(none.status, 0);
+		assert.match(none.stderr, /no host configured/);
+		assert.match(f.core().stderr, /no boxery host configured/);
+		assert.equal(existsSync(f.log), false);
 		const target = path.join(f.dir, "symlink-target");
 		writeFileSync(target, "alpha\n");
+		/** @type {[string, () => void][]} */
 		const cases = [
 			["directory", () => { mkdirSync(f.selected); writeFileSync(path.join(f.selected, "keep"), "do not delete\n"); }],
 			["FIFO", () => { const r = spawnSync("mkfifo", [f.selected]); assert.ifError(r.error); assert.equal(r.status, 0); }],
@@ -85,7 +88,6 @@ test("CLI/core reject non-regular, symlink and unreadable defaults without routi
 				[`${label}: host ls`, () => f.cli(["host", "ls"])],
 				[`${label}: host rm`, () => f.cli(["host", "rm", "alpha"])],
 				[`${label}: host use`, () => f.cli(["host", "use", "alpha"])],
-				[`${label}: legacy reset`, () => f.cli(["host", "use", "legacy"])],
 			]);
 			assert.equal(readFileSync(f.pointer, "utf8"), `${f.profile}\n`);
 			assert.equal(readFileSync(target, "utf8"), "alpha\n");

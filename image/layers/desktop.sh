@@ -1,8 +1,8 @@
 #!/bin/bash
-# boxery layer 3/3, desktop: XFCE on :1, TigerVNC + noVNC (localhost only), Firefox, Chrome (Chromium on
-# arm64) and playwright-core for vm_browser, xdotool + ImageMagick for computer use. The heavy layer (~2 min
-# to build), and the only reason a backend needs a built base: headless VMs skip it. Needs the dev-tools
-# layer (node). Runs as root, idempotent.
+# boxery layer 3/3, desktop: XFCE on :1, TigerVNC + noVNC (localhost only, with a password), Firefox, Chrome
+# (Chromium on arm64) and playwright-core for vm_browser, xdotool + ImageMagick for computer use. The heavy
+# layer (~2 min to build), and the only reason a backend needs a built base: headless VMs skip it. Needs the
+# dev-tools layer (node). Runs as root, idempotent.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 # shellcheck source=/dev/null
@@ -22,45 +22,81 @@ if ! dpkg-query -W -f='${Status}' firefox 2>/dev/null | grep -q 'install ok inst
 	apt-get update -qq && apt-get install -y -q firefox
 fi
 
-# Browser for CDP/Playwright control. amd64: Google Chrome deb. arm64 (Apple Silicon/Lima): Google ships no
-# Linux arm64 Chrome and Ubuntu's chromium is a snap, so use Playwright's Chromium build, exposed as
-# `google-chrome` (below, after playwright-core).
-if [ "$(dpkg --print-architecture)" = amd64 ] && ! command -v google-chrome >/dev/null; then
+# Browser for CDP/Playwright control. amd64: Google Chrome deb (its apt repo keeps it updated: plumbing's
+# full-upgrade). arm64 (Apple Silicon/Lima): Google ships no Linux arm64 Chrome and Ubuntu's chromium is a
+# snap, so use Playwright's Chromium build, exposed as `google-chrome` (below, after playwright-core).
+ARCH=$(dpkg --print-architecture)
+if [ "$ARCH" = amd64 ] && ! command -v google-chrome >/dev/null; then
 	curl -fsSLo /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 	apt-get install -y -q /tmp/chrome.deb && rm -f /tmp/chrome.deb
 fi
 
-# Playwright client used by the laptop extension's vm_browser tool (talks CDP to the desktop Chrome)
-[ -f /opt/boxery/node_modules/playwright-core/index.mjs ] || npm install --prefix /opt/boxery playwright-core
+# Playwright client used by the laptop extension's vm_browser tool (talks CDP to the desktop Chrome). The
+# latest release on every run, so running this layer again (boxery patch) updates it.
+npm install --prefix /opt/boxery playwright-core@latest
 ls /opt/boxery/node_modules/playwright-core/index.mjs
-# Ubuntu restricts user namespaces by executable path. Chrome's deb has a distro profile, but Playwright's
-# ARM64 Chromium needs its own so the browser can keep its sandbox enabled.
-cat >/etc/apparmor.d/boxery-chromium <<'EOF'
+if [ "$ARCH" != amd64 ]; then
+	# The Chromium build this playwright-core pins (a no-op if it's there already), then point google-chrome
+	# and the AppArmor profile at it and remove older builds. Ubuntu restricts user namespaces by executable
+	# path: Chrome's deb has a distro profile, Playwright's Chromium needs its own to keep its sandbox on.
+	B=/opt/boxery/browsers
+	PLAYWRIGHT_BROWSERS_PATH=$B node /opt/boxery/node_modules/playwright-core/cli.js install --with-deps chromium
+	REV=$(node -p 'require("/opt/boxery/node_modules/playwright-core/browsers.json").browsers.find((b) => b.name === "chromium").revision')
+	CH=$(ls -d "$B/chromium-$REV"/chrome-linux*/chrome | head -1)
+	cat >/etc/apparmor.d/boxery-chromium <<EOF
 abi <abi/4.0>,
 include <tunables/global>
-profile boxery-chromium /opt/boxery/browsers/chromium-*/chrome-linux*/chrome flags=(unconfined) {
+profile boxery-chromium $CH flags=(unconfined) {
   userns,
 }
 EOF
-if ! command -v google-chrome >/dev/null; then
-	PLAYWRIGHT_BROWSERS_PATH=/opt/boxery/browsers node /opt/boxery/node_modules/playwright-core/cli.js install --with-deps chromium
-	CH=$(ls -d /opt/boxery/browsers/chromium-*/chrome-linux*/chrome | head -1)
-	printf '#!/bin/sh\nexec %s "$@"\n' "$CH" >/usr/local/bin/google-chrome && chmod +x /usr/local/bin/google-chrome
 	apparmor_parser -r /etc/apparmor.d/boxery-chromium
+	printf '#!/bin/sh\nexec %s "$@"\n' "$CH" >/usr/local/bin/google-chrome.new && chmod +x /usr/local/bin/google-chrome.new
+	mv -f /usr/local/bin/google-chrome.new /usr/local/bin/google-chrome
+	# A browser still running an older build would crash at its next new process: stop it (vm_browser starts it again).
+	for old in "$B"/chromium-* "$B"/chromium_headless_shell-*; do
+		[ -d "$old" ] && [ "${old##*-}" != "$REV" ] || continue
+		pkill -f "^$old/" 2>/dev/null || true
+		rm -rf "$old"
+	done
 fi
 google-chrome --version
 
 mkdir -p /usr/share/novnc
 echo '<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&resize=remote&reconnect=1">' >/usr/share/novnc/index.html
 
+# The VNC password. TigerVNC's VncAuth uses 8 characters at most: 8 random letters and digits, kept on the
+# agent user's tmpfs (/run/user/UID: gone at shutdown, never on the disk). boxery-vnc.service makes one
+# before every start, so the desktop is never open, even if nobody runs `boxery desktop`; `boxery desktop`
+# sets a fresh one for each session (--new) and hands it to noVNC in the URL fragment. Xtigervnc reads the
+# file at each login: a new password applies to the next connection, and connections already open stay.
+cat >/usr/local/bin/boxery-vnc-password <<'EOF'
+#!/bin/sh
+# boxery-vnc-password [--new]: make the desktop's VNC password if there is none; --new replaces it and prints it.
+set -eu
+d=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/boxery-vnc
+umask 077
+mkdir -p "$d" && chmod 700 "$d"
+[ "${1:-}" = --new ] || [ ! -s "$d/passwd" ] || exit 0
+# A bounded read (about 60 usable characters from 256 bytes), every stage reading to the end: tr straight off
+# /dev/urandom into `head -c 8` never ends where SIGPIPE is ignored, as BSD tr then keeps reading after EPIPE.
+p=$(head -c 256 /dev/urandom | LC_ALL=C tr -dc A-Za-z0-9 | cut -c1-8)
+[ ${#p} = 8 ] || { echo "boxery-vnc-password: could not generate a password" >&2; exit 1; }
+printf '%s\n' "$p" | vncpasswd -f >"$d/passwd.new"
+mv -f "$d/passwd.new" "$d/passwd"
+[ "${1:-}" != --new ] || echo "$p"
+EOF
+chmod 755 /usr/local/bin/boxery-vnc-password
+
 # Desktop services for the agent user (systemd user units, started at boot through lingering).
 U=/etc/skel/.config/systemd/user
 mkdir -p "$U"
 cat >"$U/boxery-vnc.service" <<'EOF'
 [Unit]
-Description=boxery: TigerVNC X server :1 (localhost only)
+Description=boxery: TigerVNC X server :1 (localhost only, password required)
 [Service]
-ExecStart=/usr/bin/Xtigervnc :1 -localhost=1 -rfbport 5901 -SecurityTypes None -geometry 1600x1000 -depth 24 -AlwaysShared -desktop boxery
+ExecStartPre=/usr/local/bin/boxery-vnc-password
+ExecStart=/usr/bin/Xtigervnc :1 -localhost=1 -rfbport 5901 -SecurityTypes VncAuth -PasswordFile %t/boxery-vnc/passwd -geometry 1600x1000 -depth 24 -AlwaysShared -desktop boxery
 Restart=always
 RestartSec=2
 [Install]

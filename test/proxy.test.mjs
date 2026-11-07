@@ -1,7 +1,7 @@
 // Proxy tests: runs the real proxy against a fake upstream ("ollama" route) and a temp token file.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,9 +9,13 @@ import { after, before, test } from "node:test";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 let upstream, proxy, port, seen, conf;
+const ALL_LLM = ["chatgpt", "openai", "anthropic", "ollama"];
+/** What `boxery grant demo llm:…` leaves on the host (edge-set): the providers this VM may use. */
+const grantLlm = (llm, extra = {}) => writeFileSync(path.join(conf, "edge", "demo.json"), JSON.stringify({ hosts: {}, llm, ...extra }));
 
 const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", () => r(srv.address().port)));
 const jwt = (payload) => `${Buffer.from('{"alg":"none"}').toString("base64url")}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.x`;
+/** @param {string} p @param {{ method?: string, headers?: Record<string, any>, body?: string }} [opts] */
 async function req(p, { method = "GET", headers = {}, body } = {}) {
 	const r = await fetch(`http://127.0.0.1:${port}${p}`, { method, headers, body });
 	return { status: r.status, text: await r.text() };
@@ -30,9 +34,15 @@ before(async () => {
 	const up = await listen(upstream);
 	conf = mkdtempSync(path.join(tmpdir(), "boxery-proxy-"));
 	writeFileSync(path.join(conf, "tokens.json"), JSON.stringify({ demo: "s3cret" }));
-	port = 20000 + Math.floor(Math.random() * 20000);
+	mkdirSync(path.join(conf, "edge"));
+	grantLlm(ALL_LLM);
+	// A port the OS just handed out (a random pick can collide with another suite's proxy, which answers
+	// /healthz too and would make these tests talk to the wrong server).
+	const probe = http.createServer();
+	port = await listen(probe);
+	await new Promise((r) => probe.close(r));
 	proxy = spawn(process.execPath, [path.join(ROOT, "proxy/boxery-proxy.mjs")], {
-		env: { ...process.env, BOXERY_PROXY_MAX_BODY: String(1024 * 1024), BOXERY_CONF: conf, BOXERY_PROXY_PORT: String(port), OLLAMA_URL: `http://127.0.0.1:${up}`, BOXERY_PI_AUTH: path.join(conf, "none.json") },
+		env: { ...process.env, BOXERY_PROXY_MAX_BODY: String(1024 * 1024), BOXERY_CONF: conf, BOXERY_PROXY_PORT: String(port), OLLAMA_URL: `http://127.0.0.1:${up}`, BOXERY_OPENAI_URL: `http://127.0.0.1:${up}`, OPENAI_API_KEY: "sk-host", OPENAI_ORG_ID: "org-host", OPENAI_PROJECT_ID: "", BOXERY_PI_AUTH: path.join(conf, "none.json") },
 		stdio: "ignore",
 	});
 	for (let i = 0; i < 50; i++) {
@@ -54,6 +64,10 @@ test("rejects missing, wrong and malformed tokens without crashing", async () =>
 	const cases = [
 		{},
 		{ authorization: "Bearer demo:wrong" },
+		{ authorization: "Bearer demo:s3cre" },
+		{ authorization: "Bearer demo:s3cretx" },
+		{ authorization: `Bearer demo:s3cret${"x".repeat(4096)}` },
+		{ authorization: "Bearer demo:" },
 		{ authorization: "Bearer nobody:s3cret" },
 		{ authorization: "Bearer :s3cret" },
 		{ authorization: `Bearer ${jwt({ boxery: {} })}` },
@@ -109,10 +123,132 @@ test("unknown route → 404; missing upstream credentials → 502 (not a crash)"
 	assert.match(r.text, /ANTHROPIC_API_KEY/);
 });
 
+test("guest billing headers never reach OpenAI: the host's org is pinned, a guest project is dropped", async () => {
+	const r = await req("/openai/v1/responses", {
+		method: "POST",
+		headers: { authorization: "Bearer demo:s3cret", "content-type": "application/json", "openai-organization": "org-guest", "openai-project": "proj-guest", "x-stainless-lang": "js" },
+		body: "{}",
+	});
+	assert.equal(r.status, 200);
+	assert.equal(seen.url, "/v1/responses");
+	assert.equal(seen.headers.authorization, "Bearer sk-host");
+	assert.equal(seen.headers["openai-organization"], "org-host", "OPENAI_ORG_ID replaces the guest's org");
+	assert.equal(seen.headers["openai-project"], undefined, "no OPENAI_PROJECT_ID: the guest's project is dropped, not forwarded");
+	assert.equal(seen.headers["x-stainless-lang"], "js", "other client headers still pass");
+});
+
+test("billing headers are dropped on every LLM route, and Anthropic's own headers still pass", async () => {
+	await req("/ollama/v1/chat/completions", {
+		method: "POST",
+		headers: { authorization: "Bearer demo:s3cret", "openai-organization": "org-guest", "openai-project": "proj-guest", "chatgpt-account-id": "acct-guest", "anthropic-version": "2023-06-01", "anthropic-beta": "b1" },
+		body: "{}",
+	});
+	assert.equal(seen.headers["openai-organization"], undefined);
+	assert.equal(seen.headers["openai-project"], undefined);
+	assert.equal(seen.headers["chatgpt-account-id"], undefined);
+	assert.equal(seen.headers["anthropic-version"], "2023-06-01");
+	assert.equal(seen.headers["anthropic-beta"], "b1");
+});
+
+test("a token rotated in place (same size) is picked up on the next request", async () => {
+	const file = path.join(conf, "tokens.json");
+	const ok = (s) => req("/ollama/v1/models", { headers: { authorization: `Bearer demo:${s}` } }).then((r) => r.status);
+	assert.equal(await ok("s3cret"), 200);
+	// What the host does (boxery-operations.mjs updateToken): write a temp file, rename it over.
+	writeFileSync(`${file}.tmp`, JSON.stringify({ demo: "t3cret" }));
+	renameSync(`${file}.tmp`, file);
+	assert.equal(await ok("s3cret"), 401, "old secret refused straight away");
+	assert.equal(await ok("t3cret"), 200);
+	rmSync(file);
+	assert.equal(await ok("t3cret"), 401, "no tokens file: nobody");
+	writeFileSync(file, JSON.stringify({ demo: "s3cret" }));
+	assert.equal(await ok("s3cret"), 200);
+});
+
 test("tokens file changes take effect without restart (revocation)", async () => {
 	const h = { authorization: "Bearer demo:s3cret" };
 	assert.equal((await req("/ollama/v1/models", { headers: h })).status, 200);
 	writeFileSync(path.join(conf, "tokens.json"), JSON.stringify({}));
 	assert.equal((await req("/ollama/v1/models", { headers: h })).status, 401);
 	writeFileSync(path.join(conf, "tokens.json"), JSON.stringify({ demo: "s3cret" }));
+});
+
+test("LLM routes are deny-by-default: no grant file, no llm list, or another provider's grant → 403", async () => {
+	const h = { authorization: "Bearer demo:s3cret" };
+	const f = path.join(conf, "edge", "demo.json");
+	try {
+		/** @type {[string, () => void][]} */
+		const cases = [
+			["no edge file", () => rmSync(f, { force: true })],
+			["unreadable/garbage edge file", () => writeFileSync(f, "{not json")],
+			["http grants only (old host-map format)", () => writeFileSync(f, JSON.stringify({ hosts: { "api.example.com": { headers: {} } } }))],
+			["llm not a list", () => grantLlm("ollama")],
+			["empty llm list", () => grantLlm([])],
+			["another provider granted", () => grantLlm(["chatgpt", "anthropic"])],
+		];
+		for (const [label, setup] of cases) {
+			setup();
+			seen = undefined;
+			const r = await req("/ollama/v1/chat/completions", { method: "POST", headers: h, body: "{}" });
+			assert.equal(r.status, 403, label);
+			assert.match(r.text, /llm:ollama is not granted to this VM \(boxery grant demo llm:ollama\)/, label);
+			assert.equal(seen, undefined, `${label}: nothing reached upstream`);
+		}
+		// Grant → works on the next request; revoke → refused on the next request. No restart.
+		grantLlm(["ollama"]);
+		assert.equal((await req("/ollama/v1/models", { headers: h })).status, 200, "granted");
+		assert.equal((await req("/anthropic/v1/messages", { method: "POST", headers: h, body: "{}" })).status, 403, "only the granted provider");
+		grantLlm([]);
+		assert.equal((await req("/ollama/v1/models", { headers: h })).status, 403, "revoked");
+	} finally {
+		grantLlm(ALL_LLM);
+	}
+});
+
+test("an LLM grant is per VM: another VM's token gets nothing", async () => {
+	writeFileSync(path.join(conf, "tokens.json"), JSON.stringify({ demo: "s3cret", other: "pw" }));
+	try {
+		const r = await req("/ollama/v1/models", { headers: { authorization: "Bearer other:pw" } });
+		assert.equal(r.status, 403);
+		assert.match(r.text, /boxery grant other llm:ollama/);
+	} finally {
+		writeFileSync(path.join(conf, "tokens.json"), JSON.stringify({ demo: "s3cret" }));
+	}
+});
+
+test("the grant check runs after authentication (no grant info leaks to bad tokens)", async () => {
+	assert.equal((await req("/ollama/v1/models", { headers: { authorization: "Bearer other:nope" } })).status, 401);
+});
+
+test("a pool VM's llm grants are bound to its lease: the next lease's token can't use them", async () => {
+	const L1 = `l-${"1".repeat(32)}`, L2 = `l-${"2".repeat(32)}`;
+	const tokens = (pool) => writeFileSync(path.join(conf, "tokens.json"), JSON.stringify({ demo: "s3cret", ...(pool ? { pool } : {}) }));
+	const grant = (fields) => writeFileSync(path.join(conf, "edge", "pool.json"), JSON.stringify({ hosts: {}, llm: ["ollama"], ...fields }));
+	const call = (secret) => req("/ollama/v1/models", { headers: { authorization: `Bearer pool:${secret}` } });
+	try {
+		tokens({ secret: "s1", lease: L1 });
+		grant({ lease: L1 });
+		assert.equal((await call("s1")).status, 200, "the lease that was granted");
+		// Lease L1 ends; L2 begins with a new token. L1's grant file is still there (say the reset hasn't run).
+		tokens({ secret: "s2", lease: L2 });
+		seen = undefined;
+		const r = await call("s2");
+		assert.equal(r.status, 403, "next lease inherits nothing");
+		assert.match(r.text, /llm:ollama is not granted/);
+		assert.equal(seen, undefined, "nothing reached upstream");
+		assert.equal((await call("s1")).status, 401, "the old lease's token is gone");
+		// A grant without a lease stamp (a pet's file) doesn't count for a leased token either.
+		grant({});
+		assert.equal((await call("s2")).status, 403);
+		// L2's own grant works.
+		grant({ lease: L2 });
+		assert.equal((await call("s2")).status, 200);
+		// And a pet's token never matches a lease-stamped file.
+		writeFileSync(path.join(conf, "edge", "demo.json"), JSON.stringify({ hosts: {}, llm: ["ollama"], lease: L2 }));
+		assert.equal((await req("/ollama/v1/models", { headers: { authorization: "Bearer demo:s3cret" } })).status, 403);
+	} finally {
+		tokens(undefined);
+		rmSync(path.join(conf, "edge", "pool.json"), { force: true });
+		grantLlm(ALL_LLM);
+	}
 });

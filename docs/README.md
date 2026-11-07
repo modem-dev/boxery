@@ -19,13 +19,20 @@
 
 - **[Grants](grants.md)**: give a VM your ssh-agent, env vars, or files.
 - **[Shared pool & leases](pool.md)**: several agents share a pool of VMs safely.
+- **[GitHub Actions runners](github-runners.md)**: ephemeral self-hosted runners, one job per freshly reset pool VM.
 - **[File transfers](copy.md)**: streaming `vm_copy`, destination semantics and cancellation.
 
 ## Reference
 
 - **[Security model](security.md)**: the credential proxy, isolation, and threat model.
-- **[Backends](../host/backends/README.md)**: libvirt, Lima, and the backend contract.
+- **[Backend support](backends.md)**: queryable platforms, validation, requirements and conditional capabilities.
+- **[Backend implementations](../host/backends/README.md)**: libvirt, Lima, hosted runtimes and the backend contract.
+- **[OpenShell (experimental)](openshell.md)**: policy-enforced headless sandboxes, capabilities and setup.
 - **[Lifecycle recovery](lifecycle.md)**: operation locks, crash recovery, reconciliation and upgrade precautions.
 - **[Host module boundaries](host-modules.md)**: Node lease policy, runtime adapters, state stores and shell backends.
 - **[Architecture](../ARCHITECTURE.md)**: design notes, roadmap, failure modes.
+- **[Brand assets](brand/README.md)**: logo mark, wordmark lockup, favicons and colors.
+- **[Visual style guide](brand/style.md)**: palette, type, the isometric style, motion and words, for diagrams and video.
+- **[Promo video](promo/README.md)**: the 30 s social video, as code, and how to render it.
+- **[Research](research/README.md)**: measured workloads in boxery VMs against macOS and Docker, with the raw data and how to rerun them.
 - **[Contributing](../CONTRIBUTING.md)**: test layers and CI.
