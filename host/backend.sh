@@ -16,10 +16,14 @@ CONF=${BOXERY_CONF:-$HOME/.config/boxery}
 # Homebrew) aren't found there (#143). Appended, so the caller's PATH still wins. The launchd services
 # get the same directories (host/setup.mjs).
 if [[ $(uname) == Darwin ]]; then PATH=$PATH:/opt/homebrew/bin:/usr/local/bin; fi
-# Settings persisted by `init`. Explicit env vars win over the file. Same list as HOST_ENV in host/config.mjs.
+# Settings persisted by `init` (the names in host/host-env.list, shared with host/config.mjs). Explicit env
+# vars win over the file. Names are checked before use: a line of host.env is data, never code.
 if [ -f "$CONF/host.env" ]; then
+	allowed=" "
+	while IFS= read -r k; do case $k in [A-Z]*) [[ $k =~ ^[A-Z][A-Z0-9_]*$ ]] && allowed+="$k " ;; esac; done <"$ROOT/host/host-env.list"
 	while IFS='=' read -r k v; do
-		case $k in BOXERY_BACKEND | BOXERY_PROXY_PORT | BOXERY_PROXY_UNIT | BOXERY_POOL | BOXERY_POOL_DIR | BOXERY_BASE_VOL | BOXERY_DOMAIN_PREFIX | BOXERY_NET | BOXERY_NET_ISOLATION | LIBVIRT_DEFAULT_URI | LIMA_HOME | BOXERY_LIMA_PREFIX | BOXERY_LIMA_GATEWAY | BOXERY_LIMA_VMTYPE | BOXERY_LIMA_ARCH | BOXERY_CH_DIR | BOXERY_CH_NET | BOXERY_CH_DNS | BOXERY_CH_FIRMWARE | BOXERY_CH_SUDO | BOXERY_EXE_DIR | BOXERY_EXE_PREFIX | BOXERY_EXE_KEY | BOXERY_EXE_PORT_BASE | BOXERY_EXE_GUEST_PORT | BOXERY_EXE_EGRESS | BOXERY_EXE_POOL | BOXERY_EXE_ALLOW_INTEGRATIONS | BOXERY_EXE_MAX_CPUS | BOXERY_EXE_MAX_MEM | BOXERY_BOAT_DIR | BOXERY_BOAT_PREFIX | BOXERY_BOAT_API | BOXERY_BOAT_ORG | BOXERY_BOAT_PORT_BASE | BOXERY_BOAT_GUEST_PORT | BOXERY_BOAT_MAX_TYPE | BOXERY_BOAT_TTL | BOXERY_STALE_DAYS | BOXERY_OPENSHELL_GATEWAY | BOXERY_OPENSHELL_WORKSPACE | BOXERY_OPENSHELL_PREFIX | BOXERY_OPENSHELL_IMAGE | BOXERY_OPENSHELL_POLICY | BOXERY_OPENSHELL_PROVIDERS) [ -n "${!k:-}" ] || export "$k=$v" ;; esac
+		[[ $k =~ ^[A-Z][A-Z0-9_]*$ && $allowed == *" $k "* ]] || continue
+		[ -n "${!k:-}" ] || export "$k=$v"
 	done <"$CONF/host.env"
 fi
 export CACHE=${BOXERY_CACHE:-$HOME/.cache/boxery}

@@ -1,6 +1,7 @@
 // host/backend.sh + backend.mjs (the only way Node reaches a hypervisor backend), guest.mjs and
 // config.mjs, against the fake backend and a stub ssh. No SQLite: runs on every supported Node.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,10 +29,28 @@ function stub(name, script) {
 	chmodSync(path.join(dir, "bin", name), 0o755);
 }
 
-test("backend.sh and config.mjs read the same host.env keys", () => {
+test("backend.sh reads host.env through host/host-env.list, as config.mjs does", () => {
+	assert.ok(HOST_ENV.length > 30 && HOST_ENV.includes("BOXERY_BACKEND") && HOST_ENV.includes("BOXERY_BOAT_API"));
 	const sh = readFileSync(path.join(ROOT, "host/backend.sh"), "utf8");
-	const keys = /** @type {RegExpMatchArray} */ (sh.match(/case \$k in ([A-Z_ |]+)\)/))[1].split("|").map((k) => k.trim());
-	assert.deepEqual(keys, HOST_ENV);
+	assert.match(sh, /host\/host-env\.list/);
+	assert.doesNotMatch(sh, /BOXERY_BOAT_API|LIBVIRT_DEFAULT_URI/, "no second copy of the list");
+	// Every listed name reaches a backend function from host.env; anything else doesn't.
+	const conf = path.join(dir, "envlist");
+	mkdirSync(conf, { recursive: true });
+	writeFileSync(path.join(conf, "host.env"), [...HOST_ENV.filter((k) => k !== "BOXERY_BACKEND").map((k) => `${k}=v-${k}`), "BOXERY_BACKEND=fake", "PATH=/evil", "NOT_LISTED=x", "BAD NAME=x", "$(touch pwned)=x"].join("\n"));
+	const out = execFileSync("bash", [path.join(ROOT, "host/backend.sh"), "__functions"], { env: { HOME: dir, PATH: process.env.PATH, BOXERY_CONF: conf, BOXERY_FAKE_DIR: path.join(dir, "envlist-vms") }, encoding: "utf8" });
+	assert.match(out, /backend_list/, "the fake backend loaded (BOXERY_BACKEND from host.env)");
+	// What a backend function sees: a stub backend that prints its environment.
+	const stubRoot = path.join(dir, "envlist-root");
+	mkdirSync(path.join(stubRoot, "host", "backends"), { recursive: true });
+	for (const f of ["backend.sh", "host-env.list"]) writeFileSync(path.join(stubRoot, "host", f), readFileSync(path.join(ROOT, "host", f)));
+	writeFileSync(path.join(stubRoot, "host", "backends", "envdump.sh"), "backend_list() { env; }\n");
+	writeFileSync(path.join(conf, "host.env"), readFileSync(path.join(conf, "host.env"), "utf8").replace("BOXERY_BACKEND=fake", "BOXERY_BACKEND=envdump"));
+	const env = execFileSync("bash", [path.join(stubRoot, "host", "backend.sh"), "backend_list"], { env: { HOME: dir, PATH: process.env.PATH, BOXERY_CONF: conf }, encoding: "utf8", cwd: dir });
+	for (const k of HOST_ENV.filter((k) => k !== "BOXERY_BACKEND")) assert.match(env, new RegExp(`^${k}=v-${k}$`, "m"), k);
+	assert.doesNotMatch(env, /^NOT_LISTED=/m);
+	assert.match(env, new RegExp(`^PATH=${process.env.PATH?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m"), "PATH isn't host.env's");
+	assert.equal(existsSync(path.join(dir, "pwned")), false);
 });
 
 test("loadConfig: host.env fills unset or empty settings; explicit values win; other keys are ignored", () => {

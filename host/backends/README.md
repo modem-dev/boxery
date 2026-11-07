@@ -36,7 +36,7 @@ boxery-host asks the backend which functions it defines (`host/backend.sh __func
 
 ### Persisted settings
 
-`boxery-host init` saves the backend's settings in `$BOXERY_CONF/host.env`, and later commands export the saved values that the environment doesn't set. The keys are listed in `HOST_ENV` in [host/config.mjs](../config.mjs) and in the matching `case` in [host/backend.sh](../backend.sh); a new backend adds its `BOXERY_<NAME>_*` keys to both. Never list secrets: host.env isn't private (boat keeps its API key in its own 0600 file).
+`boxery-host init` saves the backend's settings in `$BOXERY_CONF/host.env`, and later commands export the saved values that the environment doesn't set. The keys are listed once, in [host/host-env.list](../host-env.list), which both [host/backend.sh](../backend.sh) and [host/config.mjs](../config.mjs) read; a new backend adds its `BOXERY_<NAME>_*` keys there. Never list secrets: host.env isn't private (boat keeps its API key in its own 0600 file).
 
 Platform support, requirements and capabilities are declared in
 [`backends/index.mjs`](../../backends/index.mjs). See the

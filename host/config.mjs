@@ -8,15 +8,9 @@ import { fileURLToPath } from "node:url";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// Settings `init` persists in host.env and later commands read from it (host/backend.sh reads the same
-// list): the proxy's and the backends' (host/backends/README.md).
-export const HOST_ENV = ["BOXERY_BACKEND", "BOXERY_PROXY_PORT", "BOXERY_PROXY_UNIT", "BOXERY_POOL", "BOXERY_POOL_DIR", "BOXERY_BASE_VOL",
-	"BOXERY_DOMAIN_PREFIX", "BOXERY_NET", "BOXERY_NET_ISOLATION", "LIBVIRT_DEFAULT_URI", "LIMA_HOME", "BOXERY_LIMA_PREFIX", "BOXERY_LIMA_GATEWAY", "BOXERY_LIMA_VMTYPE",
-	"BOXERY_LIMA_ARCH", "BOXERY_CH_DIR", "BOXERY_CH_NET", "BOXERY_CH_DNS", "BOXERY_CH_FIRMWARE", "BOXERY_CH_SUDO", "BOXERY_EXE_DIR",
-	"BOXERY_EXE_PREFIX", "BOXERY_EXE_KEY", "BOXERY_EXE_PORT_BASE", "BOXERY_EXE_GUEST_PORT", "BOXERY_EXE_EGRESS", "BOXERY_EXE_POOL", "BOXERY_EXE_ALLOW_INTEGRATIONS",
-	"BOXERY_EXE_MAX_CPUS", "BOXERY_EXE_MAX_MEM", "BOXERY_BOAT_DIR", "BOXERY_BOAT_PREFIX", "BOXERY_BOAT_API", "BOXERY_BOAT_ORG",
-	"BOXERY_BOAT_PORT_BASE", "BOXERY_BOAT_GUEST_PORT", "BOXERY_BOAT_MAX_TYPE", "BOXERY_BOAT_TTL", "BOXERY_STALE_DAYS", "BOXERY_OPENSHELL_GATEWAY", "BOXERY_OPENSHELL_WORKSPACE",
-	"BOXERY_OPENSHELL_PREFIX", "BOXERY_OPENSHELL_IMAGE", "BOXERY_OPENSHELL_POLICY", "BOXERY_OPENSHELL_PROVIDERS"];
+// Settings `init` persists in host.env and later commands read from it: the proxy's and the backends'
+// (host/backends/README.md). One list, host/host-env.list, which host/backend.sh reads too.
+export const HOST_ENV = readFileSync(path.join(ROOT, "host/host-env.list"), "utf8").split("\n").filter((l) => /^[A-Z][A-Z0-9_]*$/.test(l));
 
 // Backend routing settings an operation journals, so recovery replays it in the same backend namespace.
 // Never arbitrary environment variables or credentials.
