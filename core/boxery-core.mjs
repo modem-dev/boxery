@@ -944,7 +944,9 @@ export async function scroll(vm, { x, y, direction, amount, screenshot: shot }) 
 export async function browser(vm, { code, screenshot: shot, timeout }, { signal } = {}) {
 	const program = `
 const { chromium } = await import(process.env.BOXERY_PW);
-const out = (o) => new Promise(resolve => process.stdout.write('\\n__BOXERY__' + JSON.stringify(o) + '\\n', resolve));
+// Wait until the result is written before exiting (exit drops what a pipe hasn't taken yet), but never linger
+// in the VM if the reader is gone without closing (a dropped connection): give up after 30 s.
+const out = (o) => new Promise(resolve => { setTimeout(() => process.exit(1), 30000).unref(); process.stdout.write('\\n__BOXERY__' + JSON.stringify(o) + '\\n', resolve); });
 try {
   const browser = await chromium.connectOverCDP('http://127.0.0.1:${CDP_PORT}');
   const context = browser.contexts()[0] ?? await browser.newContext();
