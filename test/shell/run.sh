@@ -22,7 +22,7 @@ trip=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$out" "$trip"' EXIT
 for c in launchctl systemctl; do
 	command -v "$c" >/dev/null || continue   # absent here: keep it absent
-	printf '#!/bin/sh\necho "%s $*" >>"%s/reached.$BOXERY_TEST_FILE"\necho "test reached the real %s (stub it)" >&2\nexit 97\n' "$c" "$trip" "$c" >"$trip/$c"
+	printf '#!/bin/sh\necho "%s $*" >>"%s/reached.${BOXERY_TEST_FILE:-unknown}"\necho "test reached the real %s (stub it)" >&2\nexit 97\n' "$c" "$trip" "$c" >"$trip/$c"
 	chmod +x "$trip/$c"
 done
 export PATH="$trip:$PATH"
@@ -47,6 +47,12 @@ flush() {
 		next=$((next + 1))
 	done
 }
+# A process that lost BOXERY_TEST_FILE still trips the wire: which test is unknown, but the run fails.
+unknown() {
+	if [ -s "$trip/reached.unknown" ]; then
+		echo "  ✗ a test reached the real service manager:"; sed 's/^/    /' "$trip/reached.unknown"; rm "$trip/reached.unknown"; rc=1
+	fi
+}
 running() {
 	local c=0 i
 	for ((i = next; i < started; i++)); do [ -f "$out/${tests[$i]}.done" ] || c=$((c + 1)); done
@@ -61,4 +67,5 @@ while [ "$next" -lt "$n" ]; do
 		if [ "$next" -lt "$n" ]; then sleep 0.1; fi
 	fi
 done
+unknown
 exit $rc
