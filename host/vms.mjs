@@ -102,6 +102,7 @@ export async function createVm(rt, { name, shape, cpus, mem, disk, from, headles
 	}
 	const t0 = Date.now(), secs = () => Math.floor((Date.now() - t0) / 1000);
 	// Opt-in diagnostics stay on stderr and never include seed contents, tokens or SSH commands.
+	/** @template T @param {string} stage @param {() => Promise<T>} fn @returns {Promise<T>} */
 	const step = async (stage, fn) => {
 		if (rt.env?.BOXERY_TIMINGS !== "1") return fn();
 		const start = performance.now();
