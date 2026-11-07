@@ -25,7 +25,9 @@ while [ $# -gt 0 ]; do
 	case $1 in
 	-X) m=$2; shift 2 ;;
 	-H) hdrs+=("$2"); shift 2 ;;
-	-K) auth=$(sed -n 's/^header = "\(.*\)"$/\1/p' "$2"); shift 2 ;;
+	-K) if [ "$2" = - ]; then cfg=$(cat); else cfg=$(cat "$2"); fi   # curl config: header and data-binary (on stdin: -K -)
+		auth=$(printf '%s\n' "$cfg" | sed -n 's/^header = "\(.*\)"$/\1/p')
+		body=$(printf '%s\n' "$cfg" | sed -n 's/^data-binary = "\(.*\)"$/\1/p' | sed 's/\\"/"/g; s/\\\\/\\/g'); shift 2 ;;
 	--data-binary) body=$(cat); shift 2 ;;
 	-w | --max-time) shift 2 ;;
 	-*) shift ;;
@@ -370,5 +372,25 @@ p1=$(unset BOXERY_BOAT_PREFIX; BOXERY_BOAT_DIR=$tmp/fresh; . "$ROOT/host/backend
 [[ $p1 =~ ^bx[0-9a-f]{6}-$ ]] && ok "init generates a prefix" || bad "prefix: $p1"
 m=$( (BOXERY_BOAT_DIR=$tmp/nokey; unset BOAT_API_KEY; . "$ROOT/host/backends/boat.sh"; boat api GET /me) 2>&1 || true)
 [[ $m == *"no boat API key: set BOAT_API_KEY"* ]] && ok "no API key: says how to set it" || bad "no key message: $m"
+
+# --- lib/boat.mjs on its own: replies that aren't boat's, settings, the TSV (review of the Node port)
+B() { "${BOXERY_NODE:-node}" "$ROOT/host/backends/lib/boat.mjs" "$@"; }
+printf '#!/usr/bin/env bash\ncat >/dev/null; printf "%%s\\n200" "${FAKE_REPLY:-}"\n' >"$tmp/bin/curl.fake"; chmod +x "$tmp/bin/curl.fake"
+mkdir -p "$tmp/fakebin"; ln -sf "$tmp/bin/curl.fake" "$tmp/fakebin/curl"
+FB() { PATH="$tmp/fakebin:$PATH" BOAT_API_KEY=k BOXERY_BOAT_RETRIES=1 B "$@"; }
+FAKE_REPLY='<html>login</html>' FB check 2>"$tmp/err" && bad "an HTML 200 passed the key check" || { grep -F "not boat's JSON" "$tmp/err" >/dev/null && ok "a 2xx that isn't boat's JSON (a login page, a wrong API URL) is an error" || bad "html: $(cat "$tmp/err")"; }
+rc=0; FAKE_REPLY='{"ok":true}' FB has-base bxtest-base 2>/dev/null || rc=$?; [[ $rc == 2 ]] && ok "has-base: a reply without the snapshot list can't tell (2), never 'no base' (1)" || bad "has-base on a bad list"
+FAKE_REPLY='{"ok":true,"sandboxes":[{"id":"bx_x","name":"bxtest-vm-ok","state":"running\nevil\trunning"}],"pageInfo":{}}' FB list >"$tmp/list" 2>&1
+[[ $(wc -l <"$tmp/list" | tr -d ' ') == 1 ]] && grep -P '^ok\tunknown\t' "$tmp/list" >/dev/null && ok "a state with a tab or newline is 'unknown', never a row of its own" || bad "tsv: $(cat -A "$tmp/list")"
+printf '#!/usr/bin/env bash\necho x >>"%s"; cat >/dev/null; printf "%%s\\n200" "${FAKE_REPLY:-}"\n' "$tmp/polls" >"$tmp/fakebin/curl"; chmod +x "$tmp/fakebin/curl"
+rc=0; out=$(BOXERY_BOAT_TRIES='' BOXERY_BOAT_POLL=0 FAKE_REPLY='{"ok":true,"sandbox":{"state":"provisioning"}}' FB wait-ready bx_x 2>&1) || rc=$?
+[[ $rc == 1 && $out == *"timed out waiting for boat sandbox bx_x"* && $(wc -l <"$tmp/polls" | tr -d ' ') == 180 ]] && ok "an empty BOXERY_BOAT_TRIES is its default (180 polls), not zero" || bad "tries: rc=$rc polls=$(wc -l <"$tmp/polls") $out"
+ln -sf "$tmp/bin/curl.fake" "$tmp/fakebin/curl"
+(BOXERY_BOAT_TTL=abc FB create vm x default) 2>"$tmp/err" && bad "BOXERY_BOAT_TTL=abc accepted" || { grep -F "BOXERY_BOAT_TTL must be a number" "$tmp/err" >/dev/null && ok "a bad BOXERY_BOAT_TTL is refused, not turned into 'no auto-stop'" || bad "ttl: $(cat "$tmp/err")"; }
+(PATH="$tmp/fakebin:$PATH" BOAT_API_KEY=k BOXERY_BOAT_RETRIES=x B check) 2>"$tmp/err" && bad "BOXERY_BOAT_RETRIES=x accepted" || { grep -F "BOXERY_BOAT_RETRIES must be a whole number" "$tmp/err" >/dev/null && ok "a malformed numeric setting is refused" || bad "retries: $(cat "$tmp/err")"; }
+# the key and the body never on a command line: curl's argv
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"; cat >/dev/null; printf "{\\"ok\\":true}\\n200"\n' "$tmp/argv.log" >"$tmp/fakebin/curl"; chmod +x "$tmp/fakebin/curl"
+PATH="$tmp/fakebin:$PATH" BOAT_API_KEY=boat_SECRETKEY B api POST /x '{"secret":"BODYSECRET"}' >/dev/null 2>&1
+! grep -e boat_SECRETKEY -e BODYSECRET "$tmp/argv.log" >/dev/null && grep -F -- "-K -" "$tmp/argv.log" >/dev/null && ok "curl gets the key and the body on stdin (-K -), never on its command line" || bad "argv: $(cat "$tmp/argv.log")"
 
 echo "passed: $pass  failed: $fail"; ((fail == 0))

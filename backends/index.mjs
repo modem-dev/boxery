@@ -80,7 +80,7 @@ export const BACKENDS = {
 	boat: {
 		id: "boat", stability: "experimental", supported: both,
 		tested: [], runtime: { location: "remote", default: "boat.dev", options: ["boat.dev"] },
-		requirements: [...tools(["curl", "ssh", "ssh-keygen", "nc", "node", "openssl", "mkfifo"]), manual("boat.dev account and BOAT_API_KEY (or saved api-key)"), manual(paid, false)],
+		requirements: [...tools(["curl", "ssh", "ssh-keygen", "nc", "node", "openssl"]), manual("boat.dev account and BOAT_API_KEY (or saved api-key)"), manual(paid, false)],
 		capabilities: { ...capabilities([paid]), headless: no("boat has no headless creation; use build-base and a desktop VM on a paid plan, or another backend") },
 	},
 };

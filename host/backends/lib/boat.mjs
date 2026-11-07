@@ -3,11 +3,10 @@
 //   node boat.mjs COMMAND ARG…   (settings in BOXERY_BOAT_*; the API key in BOAT_API_KEY or $BOAT_DIR/api-key)
 // Results on stdout (one value per line, or TSV), diagnostics on stderr as `boxery-host: …`, exit 1 on
 // failure. curl sends the requests, as before: it honours the user's proxy settings (Node's fetch doesn't by
-// default), and the key goes to it through a config on a FIFO, never its command line.
-import { execFileSync, spawn } from "node:child_process";
+// default), and the key and body go to it as a config on its stdin (-K -), never its command line or disk.
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { createWriteStream, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const env = process.env;
@@ -16,9 +15,10 @@ const PREFIX = env.BOXERY_BOAT_PREFIX || "";
 const API = env.BOXERY_BOAT_API || "https://boat.dev/api/v1";
 const ORG = env.BOXERY_BOAT_ORG || "";
 const TTL = env.BOXERY_BOAT_TTL || "";
-const POLL = Number(env.BOXERY_BOAT_POLL ?? 5);
-const TRIES = Number(env.BOXERY_BOAT_TRIES ?? 180);
-const RETRIES = Number(env.BOXERY_BOAT_RETRIES ?? 5);
+/** A whole-number setting, like ${VAR:-default}: empty counts as unset; anything else that isn't one is an error.
+ *  @param {string} name @param {number} def */
+const whole = (name, def) => { const v = env[name]; if (!v) return def; if (!/^[0-9]+$/.test(v)) throw new Error(`${name} must be a whole number`); return Number(v); };
+let POLL = 5, TRIES = 180, RETRIES = 5;
 const STATES = "init,provisioning,provisioned,cloning,ready,idle,running,archiving,archived,error";
 
 class Fail extends Error {}
@@ -33,37 +33,32 @@ function apiKey() {
 	return readFileSync(f, "utf8").trim();
 }
 
-/** One HTTP request through curl: {code, body}. code "000" when curl itself failed. The key reaches curl
- *  through a config file that is a FIFO in a private (0700) directory: never on its command line or disk.
- *  @param {string} method @param {string} p @param {string} body @param {string} header @param {string} key */
+/** A value for a curl config file: "…", with \\ and \" escaped (JSON text has no raw newlines). @param {string} v */
+const cfgValue = (v) => `"${v.replace(/[\\"]/g, (c) => `\\${c}`).replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
+
+/** One HTTP request through curl: {code, body, local}. local: curl itself failed (not boat): code "000".
+ *  The key and the body reach curl as a config on its stdin (-K -): never on its command line or on disk.
+ *  @param {string} method @param {string} p @param {string} body @param {string} header @param {string} key
+ *  @returns {Promise<{ code: string, body: string, local?: boolean }>} */
 function curl(method, p, body, header, key) {
 	return new Promise((resolve) => {
-		const dir = mkdtempSync(path.join(tmpdir(), "boxery-boat-"));
-		const cfg = path.join(dir, "curl.cfg");
-		const done = (/** @type {{ code: string, body: string }} */ r) => { rmSync(dir, { recursive: true, force: true }); resolve(r); };
-		try { execFileSync("mkfifo", ["-m", "600", cfg]); } catch (e) { return done({ code: "000", body: `mkfifo: ${/** @type {Error} */ (e).message}` }); }
 		const args = ["-sS", "--max-time", "120", "-X", method, "-H", "Accept: application/json", "-w", "\n%{http_code}"];
 		if (ORG) args.push("-H", `X-Boat-Org: ${ORG}`);
 		if (header) args.push("-H", header);
-		if (body) args.push("-H", "Content-Type: application/json", "--data-binary", "@-");
-		args.push("-K", cfg, `${API}${p}`);
+		if (body) args.push("-H", "Content-Type: application/json");
+		args.push("-K", "-", `${API}${p}`);
+		const config = `header = ${cfgValue(`Authorization: Bearer ${key}`)}\n${body ? `data-binary = ${cfgValue(body)}\n` : ""}`;
 		const child = spawn("curl", args, { stdio: ["pipe", "pipe", "pipe"] });
-		// Opening a FIFO for writing waits for its reader; curl may never get there (it failed first): then the
-		// open is abandoned when the directory goes. (O_NONBLOCK would fail at once without a reader.)
-		const w = createWriteStream(cfg);
-		w.on("error", () => {});
-		w.end(`header = "Authorization: Bearer ${key}"\n`);
 		let out = "", err = "";
 		child.stdout?.on("data", (d) => (out += d));
 		child.stderr?.on("data", (d) => (err += d));
-		child.on("error", (e) => { w.destroy(); done({ code: "000", body: e.message }); });
+		child.on("error", (e) => resolve({ code: "000", body: `cannot run curl: ${e.message}`, local: true }));
 		child.on("close", (code) => {
-			w.destroy();
-			if (code !== 0) return done({ code: "000", body: (out + err).trim() });
-			const i = out.lastIndexOf("\n");
-			done({ code: out.slice(i + 1).trim(), body: out.slice(0, i) });
+			const i = out.lastIndexOf("\n"), status = out.slice(i + 1).trim(), reply = i < 0 ? "" : out.slice(0, i);
+			if (code !== 0) return resolve({ code: "000", body: (err || reply).trim() });
+			resolve({ code: status, body: reply });
 		});
-		child.stdin?.on("error", () => {}); child.stdin?.end(body);
+		child.stdin?.on("error", () => {}); child.stdin?.end(config);
 	});
 }
 
@@ -76,13 +71,15 @@ export async function api(method, p, body, header = "") {
 	const key = apiKey();
 	const text = body === undefined || body === "" ? "" : typeof body === "string" ? body : JSON.stringify(body);
 	for (let attempt = 1; ; attempt++) {
-		const { code, body: out } = /** @type {{ code: string, body: string }} */ (await curl(method, p, text, header, key));
+		const { code, body: out, local } = await curl(method, p, text, header, key);
+		if (local) fail(out); // (curl couldn't run: retrying won't help)
 		/** @type {any} */
-		let j = null;
-		try { j = JSON.parse(out); } catch { /* not JSON */ }
-		if (/^2\d\d$/.test(code) && !(j && typeof j === "object" && j.ok === false)) return j ?? {};
+		let j = null, json = true;
+		try { j = out.trim() ? JSON.parse(out) : {}; } catch { json = false; }
+		// A 2xx that isn't boat's JSON (a login page, a proxy, a wrong BOXERY_BOAT_API) is a failure, not {}.
+		if (/^2\d\d$/.test(code) && json && !(j && typeof j === "object" && j.ok === false)) return j ?? {};
 		const c = j?.code ?? j?.error?.code ?? "error", m = j?.message ?? j?.error?.message ?? "";
-		const msg = j ? `${c}: ${m}` : out.slice(0, 300);
+		const msg = json && j ? `${c}: ${m}` : `not boat's JSON: ${out.replace(/\s+/g, " ").slice(0, 200)}`;
 		if (attempt < RETRIES) {
 			const retry = (code === "429" && /^(rate_limited|IP_RATE_LIMIT)/.test(msg)) || code === "503" || (/^5\d\d$/.test(code) && ["GET", "DELETE"].includes(method)) || (code === "000" && method === "GET");
 			if (retry) { await sleep(attempt * 2); continue; }
@@ -114,8 +111,13 @@ const idsNamed = async (name) => (await sandboxes()).filter((s) => s.name === na
 const sandbox = async (id) => { const r = await api("GET", `/sandboxes/${id}`); return r?.sandbox ?? r; };
 /** @param {string} id */
 const stateOf = async (id) => String((await sandbox(id))?.state ?? "");
-/** @returns {Promise<any[]>} */
-const saved = async () => { const r = await api("GET", "/saved-snapshots"); return Array.isArray(r?.snapshots) ? r.snapshots : []; };
+/** This account's saved snapshots. A reply without the list is an error (an unknown answer, never "none").
+ *  @returns {Promise<any[]>} */
+const saved = async () => {
+	const r = await api("GET", "/saved-snapshots");
+	if (!Array.isArray(r?.snapshots)) fail(`unexpected GET /saved-snapshots reply from boat: ${JSON.stringify(r).slice(0, 200)}`);
+	return r.snapshots;
+};
 /** @param {string} name */
 const savedStatus = async (name) => String((await saved()).find((s) => s?.name === name)?.status ?? "");
 
@@ -151,7 +153,7 @@ async function save(id, name) {
 	await api("DELETE", `/saved-snapshots/${name}`).catch(() => {});
 	fail(`saving snapshot ${name} failed (${st || "timed out"})`);
 }
-const ttl = () => (TTL ? Number(TTL) : null);
+const ttl = () => (TTL ? (/^[1-9][0-9]{0,6}$/.test(TTL) ? Number(TTL) : fail("BOXERY_BOAT_TTL must be a number of seconds (or empty: no auto-stop)")) : null);
 
 /** POST /sandboxes as a boxery sandbox: named, no auto-stop unless BOXERY_BOAT_TTL, no account environment.
  *  The labels are informational (boat keeps them only on sandboxes not created from a saved snapshot).
@@ -198,8 +200,9 @@ async function list() {
 		if (cur != null && cur !== s.id) continue;
 		let disk = "";
 		try { const k = readFileSync(path.join(d, "size"), "utf8").trim().split(/\s+/)[2]; if (/^[0-9]+$/.test(k)) disk = String(Number(k) * 1073741824); } catch { /* unknown */ }
-		const st = String(s.state ?? "");
-		const state = ["ready", "idle", "running"].includes(st) ? "running" : st === "archived" ? "shut off" : st === "archiving" ? "stopping" : /^(init|provision|cloning)/.test(st) ? "starting" : st;
+		// (Only a plain word reaches the TSV: a state with a tab or newline would make a row of its own.)
+		const st = /^[a-z_-]{1,32}$/.test(String(s.state ?? "")) ? String(s.state) : "unknown";
+		const state = ["ready", "idle", "running"].includes(st) ? "running" : st === "archived" ? "shut off" : st === "archiving" ? "stopping" : /^(init|cloning|provision.*)$/.test(st) ? "starting" : st;
 		rows.push(`${n}\t${state}\t${disk}`);
 	}
 	return rows.join("\n");
@@ -213,7 +216,8 @@ async function images() {
 		const f = path.join(DIR, "images", s.name);
 		if (!existsSync(f)) continue;
 		const [image = "", k = ""] = readFileSync(f, "utf8").replace(/\n$/, "").split("\t");
-		rows.push(`${image}\t${String(s.createdAt ?? "").slice(0, 19)}\t${/^[0-9]{1,5}$/.test(k) ? `${k}GiB` : ""}`);
+		const created = String(s.createdAt ?? "").slice(0, 19).replace(/[^0-9A-Za-z:.+-]/g, "");
+		rows.push(`${image}\t${created}\t${/^[0-9]{1,5}$/.test(k) ? `${k}GiB` : ""}`);
 	}
 	return rows.join("\n");
 }
@@ -221,7 +225,7 @@ async function images() {
 /** @type {Record<string, (...a: string[]) => Promise<unknown>>} */
 const COMMANDS = {
 	// GET /me: the key works (backend_check).
-	check: async () => { const r = await api("GET", "/me"); if (!r || typeof r !== "object") fail(`unexpected GET /me reply from boat: ${JSON.stringify(r).slice(0, 200)}`); },
+	check: async () => { const r = await api("GET", "/me"); if (!r || typeof r !== "object" || Array.isArray(r) || !Object.keys(r).length) fail(`unexpected GET /me reply from boat: ${JSON.stringify(r).slice(0, 200)}`); },
 	"ids-named": async (name) => (await idsNamed(name)).join("\n"),
 	"vm-ids": async (name) => (await idsNamed(`${PREFIX}vm-${name}`)).join("\n"),
 	state: stateOf,
@@ -246,6 +250,7 @@ const COMMANDS = {
 
 const [command = "", ...args] = process.argv.slice(2);
 try {
+	POLL = whole("BOXERY_BOAT_POLL", 5); TRIES = whole("BOXERY_BOAT_TRIES", 180); RETRIES = whole("BOXERY_BOAT_RETRIES", 5);
 	if (!Object.hasOwn(COMMANDS, command)) fail(`boat.mjs: unknown command ${command}`);
 	const out = await COMMANDS[command](...args);
 	if (typeof out === "string" && out) process.stdout.write(`${out}\n`);
