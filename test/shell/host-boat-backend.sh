@@ -368,7 +368,7 @@ done
 (unset BOXERY_BOAT_PREFIX; BOXERY_BOAT_DIR=$tmp/fresh; . "$ROOT/host/backends/boat.sh"; [[ -z $BOAT_PREFIX ]] && ! backend_has_base && [[ -z $(backend_list) ]]) && ok "no prefix yet: no base, nothing listed" || bad "unprefixed"
 p1=$(unset BOXERY_BOAT_PREFIX; BOXERY_BOAT_DIR=$tmp/fresh; . "$ROOT/host/backends/boat.sh"; backend_init; echo "$BOAT_PREFIX")
 [[ $p1 =~ ^bx[0-9a-f]{6}-$ ]] && ok "init generates a prefix" || bad "prefix: $p1"
-m=$( (BOXERY_BOAT_DIR=$tmp/nokey; unset BOAT_API_KEY; . "$ROOT/host/backends/boat.sh"; boat_api GET /me) 2>&1 || true)
+m=$( (BOXERY_BOAT_DIR=$tmp/nokey; unset BOAT_API_KEY; . "$ROOT/host/backends/boat.sh"; boat api GET /me) 2>&1 || true)
 [[ $m == *"no boat API key: set BOAT_API_KEY"* ]] && ok "no API key: says how to set it" || bad "no key message: $m"
 
 echo "passed: $pass  failed: $fail"; ((fail == 0))
