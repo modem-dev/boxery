@@ -381,7 +381,7 @@ FB() { PATH="$tmp/fakebin:$PATH" BOAT_API_KEY=k BOXERY_BOAT_RETRIES=1 B "$@"; }
 FAKE_REPLY='<html>login</html>' FB check 2>"$tmp/err" && bad "an HTML 200 passed the key check" || { grep -F "not boat's JSON" "$tmp/err" >/dev/null && ok "a 2xx that isn't boat's JSON (a login page, a wrong API URL) is an error" || bad "html: $(cat "$tmp/err")"; }
 rc=0; FAKE_REPLY='{"ok":true}' FB has-base bxtest-base 2>/dev/null || rc=$?; [[ $rc == 2 ]] && ok "has-base: a reply without the snapshot list can't tell (2), never 'no base' (1)" || bad "has-base on a bad list"
 FAKE_REPLY='{"ok":true,"sandboxes":[{"id":"bx_x","name":"bxtest-vm-ok","state":"running\nevil\trunning"}],"pageInfo":{}}' FB list >"$tmp/list" 2>&1
-[[ $(wc -l <"$tmp/list" | tr -d ' ') == 1 ]] && grep -P '^ok\tunknown\t' "$tmp/list" >/dev/null && ok "a state with a tab or newline is 'unknown', never a row of its own" || bad "tsv: $(cat -A "$tmp/list")"
+[[ $(wc -l <"$tmp/list" | tr -d ' ') == 1 && $(cut -f1,2 "$tmp/list") == "ok"$'\t'"unknown" ]] && ok "a state with a tab or newline is 'unknown', never a row of its own" || bad "tsv: $(cat -A "$tmp/list")"
 printf '#!/usr/bin/env bash\necho x >>"%s"; cat >/dev/null; printf "%%s\\n200" "${FAKE_REPLY:-}"\n' "$tmp/polls" >"$tmp/fakebin/curl"; chmod +x "$tmp/fakebin/curl"
 rc=0; out=$(BOXERY_BOAT_TRIES='' BOXERY_BOAT_POLL=0 FAKE_REPLY='{"ok":true,"sandbox":{"state":"provisioning"}}' FB wait-ready bx_x 2>&1) || rc=$?
 [[ $rc == 1 && $out == *"timed out waiting for boat sandbox bx_x"* && $(wc -l <"$tmp/polls" | tr -d ' ') == 180 ]] && ok "an empty BOXERY_BOAT_TRIES is its default (180 polls), not zero" || bad "tries: rc=$rc polls=$(wc -l <"$tmp/polls") $out"
