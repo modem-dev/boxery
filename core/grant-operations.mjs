@@ -218,15 +218,20 @@ export const PUSHED_KINDS = new Set(["env", "file", "http", "llm"]);
  * After a restart, revert or new lease: push VM's pushed grants again, if it has any (always: reconcile even
  * with none, as after a revert). Never fails the caller: problems are logged. log gets the warnings (boxery:
  * lines); say, if given, the whole report.
- * @param {string} vm @param {{ always?: boolean, interactiveCommands?: boolean, log?: (line: string) => void, say?: (text: string) => void }} [opts]
+ * before: runs once pushed grants are found; false skips applying them (it has said why).
+ * @param {string} vm @param {{ always?: boolean, interactiveCommands?: boolean, log?: (line: string) => void, say?: (text: string) => void, before?: () => boolean }} [opts]
  */
-export async function reapplyPushed(vm, { always = false, interactiveCommands = false, log = () => {}, say } = {}) {
+export async function reapplyPushed(vm, { always = false, interactiveCommands = false, log = () => {}, say, before } = {}) {
 	try {
 		if (!always && !listGrants(vm).some((g) => PUSHED_KINDS.has(g.kind))) return;
+		if (before && !before()) return;
 		const out = await applyGrants(vm, { interactiveCommands });
 		if (say) say(out);
 		else for (const line of out.split("\n")) if (line.startsWith("boxery:")) log(line);
-	} catch (e) { log(`boxery: could not apply grants to ${vm}: ${/** @type {Error} */ (e).message}`); }
+	} catch (e) {
+		const msg = /** @type {Error} */ (e).message;
+		log(`boxery: ${msg.startsWith("could not apply grants") ? msg : `could not apply grants to ${vm}: ${msg}`}`);
+	}
 }
 /** Used by fork: resolve and validate every source grant before confirmation and creation.
  * @param {string} vm @returns {GrantSpec[]}

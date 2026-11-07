@@ -8,16 +8,17 @@ import { formatGrants, hostBackend } from "../core/boxery-core.mjs";
 import { parseGrantArgs } from "../core/grant-approval.mjs";
 import { addGrants, applyGrants, grantCommand, grantPrompt, listGrants, revokeGrants, storedSpecs } from "../core/grants.mjs";
 import { reapplyPushed } from "../core/grant-operations.mjs";
-import { CliError, VALID_VM, die, needHost, needVm, note, say } from "./lib.mjs";
+import { CliError, VALID_VM, die, needHost, needVm, note, say, warn } from "./lib.mjs";
 /** @import { GrantSpec } from "../core/boxery-core.mjs" */
 /** @import { Selected } from "./lib.mjs" */
 
 /** Grant commands may ask on this terminal (an env --cmd helper's prompt). */
 const interactive = { interactiveCommands: true };
 
+const OPENSHELL = "OpenShell credentials and egress are managed through OpenShell providers/policy, not Boxery grants";
 /** @param {Selected} s */
 function refuseOpenShell(s) {
-	if (hostBackend(s.host) === "openshell") die("OpenShell credentials and egress are managed through OpenShell providers/policy, not Boxery grants");
+	if (hostBackend(s.host) === "openshell") die(OPENSHELL);
 }
 
 /** Validate SPEC words into canonical specs, before anything is asked or changed. @param {Selected} s @param {string[]} words */
@@ -114,6 +115,7 @@ export async function agentForward(s, args) {
 /** Before a connection that needs them (ssh, attach, run --bg): push VM's pushed grants again (they live in
  *  tmpfs). Quiet but for warnings; never fails the command. @param {Selected} s @param {string} vm */
 export async function reapplyQuiet(s, vm) {
-	if (!VALID_VM.test(vm) || hostBackend(s.host) === "openshell") return;
-	await reapplyPushed(vm, { interactiveCommands: true, log: note });
+	if (!VALID_VM.test(vm)) return;
+	// (On OpenShell, stored pushed grants only earn the warning that it manages credentials itself.)
+	await reapplyPushed(vm, { interactiveCommands: true, log: note, before: () => (hostBackend(s.host) === "openshell" ? (warn(OPENSHELL), false) : true) });
 }

@@ -292,16 +292,15 @@ export const COMMANDS = {
 	// A revert restores the snapshot's tmpfs too: grants are always reconciled to the current ones.
 	revert: async (s, [n, snap]) => { needHost(s); if (!VALID_SNAP.test(snap ?? "")) die(`invalid snapshot name: ${snap ?? ""}`); await lc(() => lifecycle.revertVm(needVm(n), snap, passthrough())); },
 	snap: async (s, args) => {
-		needHost(s); const n = needVm(args[0]);
+		needHost(s);
 		if (args[1] && !VALID_SNAP.test(args[1])) die(`invalid snapshot name: ${args[1]}`);
-		if (args.length > 2) die("usage: boxery snap NAME [SNAP]");
-		await lc(() => lifecycle.snapVm(n, args[1] || null, passthrough()));
+		await lc(() => lifecycle.snapVm(needVm(args[0]), args[1] || null, passthrough()));
 	},
 	new: async (s, args) => { needHost(s); await cmdNew(s, args); },
 	fork: async (s, args) => { needHost(s); await cmdFork(s, args); },
 	"snap-rm": async (s, args) => {
 		needHost(s);
-		if (args.length !== 2 || !VALID_SNAP.test(args[1])) die("usage: boxery snap-rm NAME SNAP");
+		if (!args[1] || !VALID_SNAP.test(args[1])) die("usage: boxery snap-rm NAME SNAP");
 		await lc(() => lifecycle.snapRm(needVm(args[0]), args[1], passthrough()));
 	},
 	images: async (s, args) => hostPass(s, ["images", ...args]),

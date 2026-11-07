@@ -162,7 +162,12 @@ export async function patch(args, opts = {}) {
 	let names;
 	if (first === "--all") {
 		// (Which VMs it may restart: their connections and grants are renewed after. A failed listing ends here.)
-		names = (await listVms()).filter((v) => v.state === "running").map((v) => /** @type {string} */ (v.name));
+		// (ls --json alone: a VM's unreadable grant store mustn't keep the others from being patched.)
+		const out = await hostRun(["ls", "--json"], { timeout: 120_000, signal: opts.signal });
+		if (!out.startsWith("[")) throw new Error(`host returned no JSON for 'ls --json' (update boxery-host on ${(await profileConfig()).host})`);
+		/** @type {Array<{ name?: unknown, state?: unknown }>} */
+		const rows = JSON.parse(out);
+		names = rows.filter((r) => r.state === "running" && typeof r.name === "string" && VALID_NAME.test(r.name)).map((r) => /** @type {string} */ (r.name));
 	} else names = [assertName(first)];
 	for (const n of names) await closeMaster(n);
 	try { return await host(["patch", ...args], opts); }
