@@ -20,11 +20,12 @@ if [[ $(uname) == Darwin ]]; then PATH=$PATH:/opt/homebrew/bin:/usr/local/bin; f
 # vars win over the file. Names are checked before use: a line of host.env is data, never code.
 if [ -f "$CONF/host.env" ]; then
 	allowed=" "
-	while IFS= read -r k; do case $k in [A-Z]*) [[ $k =~ ^[A-Z][A-Z0-9_]*$ ]] && allowed+="$k " ;; esac; done <"$ROOT/host/host-env.list"
-	while IFS='=' read -r k v; do
+	while IFS= read -r k || [[ -n $k ]]; do k=${k%$'\r'}; [[ $k =~ ^[A-Z][A-Z0-9_]*$ ]] && allowed+="$k "; done <"$ROOT/host/host-env.list"
+	while IFS='=' read -r k v || [[ -n $k ]]; do
 		[[ $k =~ ^[A-Z][A-Z0-9_]*$ && $allowed == *" $k "* ]] || continue
 		[ -n "${!k:-}" ] || export "$k=$v"
 	done <"$CONF/host.env"
+	unset allowed k v
 fi
 export CACHE=${BOXERY_CACHE:-$HOME/.cache/boxery}
 # shellcheck disable=SC2034  # read by the sourced backend

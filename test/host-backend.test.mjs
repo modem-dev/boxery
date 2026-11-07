@@ -31,6 +31,7 @@ function stub(name, script) {
 
 test("backend.sh reads host.env through host/host-env.list, as config.mjs does", () => {
 	assert.ok(HOST_ENV.length > 30 && HOST_ENV.includes("BOXERY_BACKEND") && HOST_ENV.includes("BOXERY_BOAT_API"));
+	assert.ok(readFileSync(path.join(ROOT, "host/host-env.list"), "utf8").endsWith("\n"), "the list ends in a newline");
 	const sh = readFileSync(path.join(ROOT, "host/backend.sh"), "utf8");
 	assert.match(sh, /host\/host-env\.list/);
 	assert.doesNotMatch(sh, /BOXERY_BOAT_API|LIBVIRT_DEFAULT_URI/, "no second copy of the list");

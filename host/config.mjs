@@ -10,7 +10,7 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 
 // Settings `init` persists in host.env and later commands read from it: the proxy's and the backends'
 // (host/backends/README.md). One list, host/host-env.list, which host/backend.sh reads too.
-export const HOST_ENV = readFileSync(path.join(ROOT, "host/host-env.list"), "utf8").split("\n").filter((l) => /^[A-Z][A-Z0-9_]*$/.test(l));
+export const HOST_ENV = readFileSync(path.join(ROOT, "host/host-env.list"), "utf8").split(/\r?\n/).filter((l) => /^[A-Z][A-Z0-9_]*$/.test(l));
 
 // Backend routing settings an operation journals, so recovery replays it in the same backend namespace.
 // Never arbitrary environment variables or credentials.
