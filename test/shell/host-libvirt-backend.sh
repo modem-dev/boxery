@@ -50,7 +50,7 @@ upload_vol() { printf 'upload %s %s\n' "$1" "$2" >>"$LOG"; : >"$V/$2"; }
 if (
 	vm_ip() { if [[ -e $T/ip-polled ]]; then echo 192.0.2.10; else touch "$T/ip-polled"; fi; }
 	sleep() { [[ $1 == 0.25 ]] || exit 1; echo sleep >>"$T/ip-sleeps"; }
-	[[ $(wait_ip test) == 192.0.2.10 ]] && [[ $(wc -l <"$T/ip-sleeps") == 1 ]]
+	[[ $(wait_ip test) == 192.0.2.10 ]] && [[ $(wc -l <"$T/ip-sleeps" | tr -d " ") == 1 ]]
 ); then ok "wait_ip probes every 250 ms until an address arrives"; else bad "wait_ip fast probes"; fi
 if (
 	SECONDS=0
