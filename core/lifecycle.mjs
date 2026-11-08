@@ -56,13 +56,15 @@ function sizeArgs({ shape, cpus, mem, disk }) {
 /**
  * Create VM NAME. grants: approved specs, saved and applied once it exists.
  * @param {string} name @param {{ shape?: string | null, cpus?: number | string | null, mem?: number | string | null, disk?: number | string | null,
- *   from?: string | null, headless?: boolean, layers?: string | null, grants?: GrantSpec[] }} [spec] @param {LifecycleOpts} [opts]
+ *   from?: string | null, headless?: boolean, distro?: string | null, layers?: string | null, grants?: GrantSpec[] }} [spec] @param {LifecycleOpts} [opts]
  */
-export async function newVm(name, { from, headless, layers, grants = [], ...size } = {}, opts = {}) {
+export async function newVm(name, { from, headless, distro, layers, grants = [], ...size } = {}, opts = {}) {
 	assertName(name);
 	if (from != null) assertImage(from);
+	if (distro != null && !["ubuntu", "arch"].includes(distro)) throw new Error("--distro must be ubuntu or arch");
+	if (distro && from) throw new Error("--distro cannot be combined with --from");
 	if (layers != null && !/^[a-z0-9,-]+$/.test(layers)) throw new Error(`invalid layer list: ${layers}`);
-	const out = await host(["new", name, ...(headless ? ["--headless"] : []), ...(layers != null ? ["--layers", layers] : []), ...sizeArgs(size), ...(from ? ["--from", from] : [])], opts);
+	const out = await host(["new", name, ...(headless ? ["--headless"] : []), ...(distro ? ["--distro", distro] : []), ...(layers != null ? ["--layers", layers] : []), ...sizeArgs(size), ...(from ? ["--from", from] : [])], opts);
 	if (grants.length) sayer(opts)?.(await addGrants(name, grants, { interactiveCommands: opts.stdin === "inherit" }));
 	return out;
 }

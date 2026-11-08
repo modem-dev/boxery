@@ -5,10 +5,29 @@
 # ships most dev tools); one `apt-get update` per provisioning run, and only if something is missing.
 pkgs() {
 	local p missing=()
+	if command -v pacman >/dev/null 2>&1; then
+		# Never sync the database without upgrading: Arch does not support partial upgrades.
+		for p in "$@"; do
+			case $p in fd-find) p=fd ;; build-essential) p=base-devel ;; python3) p=python ;; python3-venv) continue ;; gnupg) p=gnupg ;; esac
+			pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p")
+		done
+		((${#missing[@]})) || return 0
+		pacman -Syu --needed --noconfirm "${missing[@]}"
+		return
+	fi
 	for p in "$@"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing+=("$p"); done
 	((${#missing[@]})) || return 0
 	apt_update_once
 	apt-get install -y -q --no-install-recommends "${missing[@]}"
+}
+
+# Upgrade the guest through its native package manager before installing layers.
+upgrade_system() {
+	if command -v pacman >/dev/null 2>&1; then pacman -Syu --noconfirm
+	else
+		apt_update_once
+		apt-get -y -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
+	fi
 }
 
 # One `apt-get update` per provisioning run (/run is a tmpfs: the next boot starts over).

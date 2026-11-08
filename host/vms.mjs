@@ -18,7 +18,7 @@ import { hostUsage } from "./help.mjs";
 /** Parsed `new` arguments; sizes are the flags' strings ("" = unset). layers: optional layers on top of
  *  plumbing + devtools (headless only). sameAs (fork, not a flag): the shape name to record although the
  *  size is given by flags, which copy that shape's size exactly.
- *  @typedef {{ name: string, shape: string, cpus: string, mem: string, disk: string, from: string, headless: boolean, layers?: string[], sameAs?: string }} NewArgs */
+ *  @typedef {{ name: string, shape: string, cpus: string, mem: string, disk: string, from: string, headless: boolean, distro?: string, layers?: string[], sameAs?: string }} NewArgs */
 // Layers a headless VM may add with --layers (image/layers/; the base layers are always there).
 export const OPTIONAL_LAYERS = ["github-runner"];
 /** @typedef {{ cpus: string, mem: string, disk: string }} SizeFlags */
@@ -62,6 +62,7 @@ export function parseNewArgs(args) {
 		else if (a === "--shape") { if (!SHAPE_NAME.test(v ?? "")) fail(`invalid shape name '${v ?? ""}'`); o.shape = v; i++; }
 		else if (["--cpus", "--mem", "--disk"].includes(a)) { o[/** @type {keyof SizeFlags} */ (a.slice(2))] = validNum(a, v); i++; }
 		else if (a === "--from") { o.from = validImage(v); i++; }
+		else if (a === "--distro") { if (!["ubuntu", "arch"].includes(v)) fail("--distro must be ubuntu or arch"); o.distro = v; i++; }
 		else if (a.startsWith("-")) fail(`unknown flag ${a}`);
 		else o.name = a;
 	}
@@ -73,8 +74,12 @@ export function parseNewArgs(args) {
 }
 
 /** Create, boot and wait for NAME. Returns "NAME HOST:PORT". @param {Runtime} rt @param {NewArgs} args */
-export async function createVm(rt, { name, shape, cpus, mem, disk, from, headless, layers = [], sameAs }) {
+export async function createVm(rt, { name, shape, cpus, mem, disk, from, headless, distro, layers = [], sameAs }) {
 	validName(name);
+	if (distro && !["ubuntu", "arch"].includes(distro)) fail("--distro must be ubuntu or arch");
+	if (distro && from) fail("--distro cannot be combined with --from: images keep their guest distribution");
+	if (distro === "arch" && (rt.backend !== "lima" || !headless || layers.length)) fail("Arch currently requires Lima, --headless and no optional --layers");
+	if (distro === "ubuntu" && !["lima", "libvirt", "cloud-hypervisor", "fake"].includes(rt.backend)) fail(`explicit Ubuntu selection is not supported by ${rt.backend}`);
 	if (rt.backend === "openshell") {
 		if (!headless || from) fail("OpenShell supports only new --headless without --from; no desktop, snapshots, forks or pools");
 		if (disk) fail("OpenShell disk sizing is managed by its compute driver; omit --disk");
@@ -97,7 +102,7 @@ export async function createVm(rt, { name, shape, cpus, mem, disk, from, headles
 		({ kind, os } = inheritedType(rt.db(), from)); src = from;
 		if (headless && kind !== "headless") fail(`${from} has a desktop, and a VM made from an image keeps it (drop --headless)`);
 	} else if (headless) {
-		kind = "headless"; src = "stock"; provision = ["plumbing", "devtools", ...layers].join(" ");
+		kind = "headless"; src = distro === "arch" ? "stock-arch" : "stock"; provision = ["plumbing", "devtools", ...layers].join(" ");
 	} else if (!await rt.vms.hasBase()) {
 		fail(`no base image; run: boxery-host build-base (or: new ${name} --headless, which needs none)`);
 	}

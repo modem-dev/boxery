@@ -282,6 +282,7 @@ export const TOOLS = [
 				snapshot: { type: "string", description: "snapshot name for snap/revert/snap-rm" },
 				from: { type: "string", description: "for new: image to create the VM from, VM@SNAP (see vm_info images)" },
 				headless: { type: "boolean", description: "for new: no desktop (default false: XFCE desktop, Chrome, computer use)" },
+				distro: { type: "string", enum: ["ubuntu", "arch"], description: "for new: guest distribution; Arch is experimental, Lima x86_64 headless only" },
 				to: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "for fork: new VM name(s)" },
 				use: { type: "boolean", description: "for new: also make it the current VM" },
 				shape: { type: "string", description: "for new/fork: VM size by name (see vm_info shapes); default: the host's default shape (fork: the source's size)" },

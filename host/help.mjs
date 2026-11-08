@@ -45,7 +45,7 @@ export const HOST_COMMANDS = {
 	new: {
 		help: {
 			group: "vms", summary: "create a VM; prints NAME HOST:PORT", usage: ["new NAME [--shape S] [--cpus N] [--mem MiB] [--disk GiB] [--from IMAGE] [--headless [--layers L,…]]"],
-			flags: [...SIZE_FLAGS, ["--from IMAGE", "Boot from an image (e.g. demo@s1; keeps its desktop or not)"], ["--headless", "No desktop; boots the stock image, no build-base needed"], ["--layers L,…", "Optional image layers for a headless VM (github-runner)"]],
+			flags: [...SIZE_FLAGS, ["--distro ubuntu|arch", "Guest distribution (Arch: experimental Lima x86_64 headless only)"], ["--from IMAGE", "Boot from an image (e.g. demo@s1; keeps its desktop or not)"], ["--headless", "No desktop; boots the stock image, no build-base needed"], ["--layers L,…", "Optional image layers for a headless VM (github-runner)"]],
 			docs: "cli.md#lifecycle",
 		},
 	},

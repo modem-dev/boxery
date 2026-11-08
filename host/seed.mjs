@@ -113,7 +113,7 @@ export function cloudConfig({ name, keys, upstream, cred, ollama = [], provision
 		"runcmd:",
 		// Backends without a cloud-init seed (Lima, exe) run boxery-provision themselves (README: backend_new).
 		...(provision ? ['  - [bash, -c, "/usr/local/sbin/boxery-provision >/var/log/boxery-provision.log 2>&1"]'] : []),
-		...(hostKey ? ['  - [sh, -c, "systemctl try-reload-or-restart ssh.service || true"]'] : []),
+		...(hostKey ? ['  - [sh, -c, "systemctl try-reload-or-restart ssh.service || systemctl try-reload-or-restart sshd.service || true"]'] : []),
 		'  - [bash, -c, "systemctl restart boxery-llm.service"]',
 		`  - [bash, -c, "chown -R agent:agent ${linux.home} && sudo -u agent bash -lc 'git config --global user.name agent; git config --global user.email agent@boxery; git config --global init.defaultBranch main; mkdir -p ~/project && cd ~/project && git init -q'"]`,
 		"",

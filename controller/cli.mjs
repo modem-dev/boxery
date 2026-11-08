@@ -35,7 +35,7 @@ const grants = () => import("./grants.mjs");
 
 /** new NAME [--shape S] [--cpus N --mem MiB --disk GiB] [--from IMAGE] [--headless [--layers L,...]] [--grant SPEC]... [--agent-forward] @param {Selected} s @param {string[]} args @returns {Promise<void>} */
 async function cmdNew(s, args) {
-	let name = "", from = null, headless = false, layers = null;
+	let name = "", from = null, headless = false, layers = null, distro = null;
 	/** @type {Record<string, string>} */
 	const size = {};
 	/** @type {string[]} */
@@ -46,6 +46,7 @@ async function cmdNew(s, args) {
 		else if (a === "--grant") { if (v == null) die("--grant needs a value"); specs.push(v); i++; }
 		else if (a === "--agent-forward") specs.push("ssh-agent");
 		else if (a === "--headless") headless = true;
+		else if (a === "--distro") { if (!["ubuntu", "arch"].includes(v ?? "")) die("--distro must be ubuntu or arch"); distro = v; i++; }
 		else if (a === "--layers") { if (v == null) die("--layers needs a value"); if (!/^[a-z0-9,-]+$/.test(v)) die(`invalid layer list: ${v}`); layers = v; i++; }
 		else if (a === "--shape") { if (v == null) die("--shape needs a value"); if (!VALID_VM.test(v)) die(`invalid shape name: ${v}`); size.shape = v; i++; }
 		else if (["--cpus", "--mem", "--disk"].includes(a)) { if (v == null) die(`${a} needs a value`); if (!/^[0-9]+$/.test(v)) die(`${a} must be a number`); size[a.slice(2)] = v; i++; }
@@ -55,7 +56,7 @@ async function cmdNew(s, args) {
 	needVm(name);
 	// Validate and approve the whole batch before creating anything.
 	const approved = specs.length ? await (await grants()).confirm(s, name, specs) : [];
-	await lc(() => lifecycle.newVm(name, { ...size, from, headless, layers, grants: approved }, passthrough()));
+	await lc(() => lifecycle.newVm(name, { ...size, from, headless, distro, layers, grants: approved }, passthrough()));
 }
 
 /** fork SRC DST... [--shape S] [--cpus N --mem MiB --disk GiB] [--grants] @param {Selected} s @param {string[]} args @returns {Promise<void>} */
@@ -316,7 +317,7 @@ export const COMMANDS = {
 	new: {
 		help: {
 			group: "vms", summary: "create a VM", usage: ["new NAME [--shape S] [--cpus N --mem MiB --disk GiB] [--headless [--layers L,...]] [--grant SPEC]... [--agent-forward]", "new NAME --from VM@SNAP"],
-			flags: [...SIZE_FLAGS, ["--headless", "No desktop (shell and agents only); needs no build-base"], ["--layers L,...", "Extra image layers for a headless VM (github-runner)"], ["--from VM@SNAP", "Start from a snapshot (boxery images lists them)"], ["--grant SPEC", "Grant access at creation (asks first; see boxery grant)"], ["--agent-forward", "Same as --grant ssh-agent"]],
+			flags: [...SIZE_FLAGS, ["--distro ubuntu|arch", "Guest distribution (Arch: experimental Lima x86_64 headless only)"], ["--headless", "No desktop (shell and agents only); needs no build-base"], ["--layers L,...", "Extra image layers for a headless VM (github-runner)"], ["--from VM@SNAP", "Start from a snapshot (boxery images lists them)"], ["--grant SPEC", "Grant access at creation (asks first; see boxery grant)"], ["--agent-forward", "Same as --grant ssh-agent"]],
 			examples: [["A desktop VM", "boxery new demo"], ["A larger, headless one", "boxery new ci-1 --headless --shape large"], ["A GitHub Actions runner VM", "boxery new runner-1 --headless --layers github-runner"]],
 			seeAlso: ["shapes", "fork", "rm"], docs: "cli.md#lifecycle",
 		},

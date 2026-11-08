@@ -85,11 +85,18 @@ guest_proxy_upstream() { echo "TCP:$LIMA_GATEWAY:$PROXY_PORT"; }
 # Lima template for both the builder and each VM. The desktop install (image/base-user-data.yaml) runs
 # once in the builder; clones inherit its disk. Per-VM cloud-config (keys, token, configs) is applied
 # by boxery-host over ssh after the clone boots (Lima owns the cloud-init seed).
-lima_template() { # NAME CPUS MEM_MIB DISK_GIB
+lima_template() { # NAME CPUS MEM_MIB DISK_GIB [DISTRO]
+	local distro=${5:-ubuntu-24.04}
+	if [[ $distro == archlinux ]]; then
+		# Lima's aarch64 Arch image is a separate, old community build. Do not silently select it.
+		local arch=$LIMA_ARCH
+		[[ $arch != default ]] || arch=$(uname -m)
+		[[ $arch == x86_64 ]] || die "Arch currently requires Lima's x86_64 image (set BOXERY_LIMA_ARCH=x86_64 with qemu for emulation)"
+	fi
 	cat <<-EOF
 		minimumLimaVersion: 2.0.0
 		base:
-		- template:_images/ubuntu-24.04
+		- template:_images/$distro
 		vmType: $LIMA_VMTYPE
 		arch: $LIMA_ARCH
 		cpus: $2
@@ -141,7 +148,7 @@ lima_apply_cloudconfig() { # FILE build|vm [NAME]
 	else
 		# The files include the VM's pinned ssh host key (host/hostkeys.mjs): make sshd load it now, also
 		# where it runs as a long-lived ssh.service rather than socket-activated.
-		if grep -q '^  - path: /etc/ssh/boxery_host_ed25519_key$' "$f"; then echo 'systemctl try-reload-or-restart ssh.service || true' >>"$f.files.sh"; fi
+		if grep -q '^  - path: /etc/ssh/boxery_host_ed25519_key$' "$f"; then echo 'systemctl try-reload-or-restart ssh.service || systemctl try-reload-or-restart sshd.service || true' >>"$f.files.sh"; fi
 		ssh -F "$HOME/.lima/$(linst "$3")/ssh.config" "lima-$(linst "$3")" 'sudo bash -s' <"$f.files.sh" || return 1
 	fi
 	rm -f "$f.files.sh"
@@ -157,10 +164,12 @@ backend_exists() { lima_exists_inst "$(linst "$1")"; }
 backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL image | stock]
 	local name=$1 cpus=$2 mem=$3 disk=$4 userdata=$5 from=${6:-} i src; i=$(linst "$1")
 	local sshcfg="$HOME/.lima/$i/ssh.config"
-	if [[ $from == stock ]]; then
-		log "creating $name (Lima $LIMA_VMTYPE, ${cpus} vCPU, ${mem} MiB, ${disk} GiB, headless: stock Ubuntu 24.04)"
+	if [[ $from == stock || $from == stock-arch ]]; then
+		local distro=ubuntu-24.04
+		[[ $from != stock-arch ]] || distro=archlinux
+		log "creating $name (Lima $LIMA_VMTYPE, ${cpus} vCPU, ${mem} MiB, ${disk} GiB, headless: stock $distro)"
 		local tmp; tmp=$(mktemp -d)
-		lima_template "$name" "$cpus" "$mem" "$disk" >"$tmp/vm.yaml"
+		lima_template "$name" "$cpus" "$mem" "$disk" "$distro" >"$tmp/vm.yaml"
 		limactl create --name "$i" --tty=false "$tmp/vm.yaml" >/dev/null 2>"$tmp/create.log" || { cat "$tmp/create.log" >&2; rm -rf "$tmp"; die "limactl create failed"; }
 		rm -rf "$tmp"
 	else
@@ -180,7 +189,7 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 	lima_apply_cloudconfig "$userdata" vm "$name" || die "applying per-VM config failed"
 	# The stock image: what the cloud-config's first runcmd step does on seeded backends. boxery-host
 	# checks the result (/var/log/boxery-provision.ok) and shows the log if it failed.
-	if [[ $from == stock ]]; then
+	if [[ $from == stock || $from == stock-arch ]]; then
 		ssh -F "$sshcfg" "lima-$i" 'sudo sh -c "/usr/local/sbin/boxery-provision >/var/log/boxery-provision.log 2>&1"' </dev/null || log "provisioning $name failed"
 	fi
 	# authorized keys (host mgmt key + registered controller keys), hostname, then the runcmd steps.
@@ -192,7 +201,7 @@ backend_new() { # NAME CPUS MEM_MIB DISK_GIB USERDATA_FILE [SOURCE: VM@LABEL ima
 		cd ~ && git config --global user.name agent && git config --global user.email agent@boxery && git config --global init.defaultBranch main;
 		mkdir -p ~/project && cd ~/project && { [ -d .git ] || git init -q; }; systemctl --user daemon-reload; systemctl --user start boxery-vnc boxery-desktop boxery-novnc 2>/dev/null || true"
 	# From an image: the disk is another VM's. Give it its own machine-id (journald, DHCP client id).
-	if [[ -n $from && $from != stock ]]; then ssh -F "$sshcfg" "lima-$i" 'sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup >/dev/null' || true; fi
+	if [[ -n $from && $from != stock && $from != stock-arch ]]; then ssh -F "$sshcfg" "lima-$i" 'sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup >/dev/null' || true; fi
 }
 
 # Bytes the instance's disk files take on the host (blocks allocated, not their sparse size): `disk`

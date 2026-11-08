@@ -9,15 +9,16 @@ export DEBIAN_FRONTEND=noninteractive
 
 # The agent user. cloud-init creates it on libvirt/cloud-hypervisor (user-data `users:`), Lima creates it
 # from its template; exeuntu has neither.
-id agent >/dev/null 2>&1 || useradd -m -s /bin/bash -c "boxery agent" -G sudo,adm agent
+agent_groups=sudo,adm
+if command -v pacman >/dev/null 2>&1; then agent_groups=wheel; fi
+id agent >/dev/null 2>&1 || useradd -m -s /bin/bash -c "boxery agent" -G "$agent_groups" agent
 echo "agent ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/90-boxery-agent; chmod 440 /etc/sudoers.d/90-boxery-agent
 
 # Security updates (kernel included) before anything else: the starting image can be months old (the cloud
 # image is downloaded once and cached; Lima's template and exeuntu lag too), and pkgs only adds what's
 # missing. A desktop base's clones boot the new kernel; a headless VM runs it from its first restart.
 # The lock timeout waits out unattended-upgrades, which a cloud image may start during first boot.
-apt_update_once
-apt-get -y -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
+upgrade_system
 
 # socat: the guest end of the LLM proxy. qemu-guest-agent: libvirt freezes filesystems for snapshots.
 pkgs socat tmux git curl ca-certificates qemu-guest-agent
@@ -25,12 +26,12 @@ pkgs socat tmux git curl ca-certificates qemu-guest-agent
 mkdir -p /etc/boxery /etc/cloud/cloud.cfg.d /etc/systemd/system /etc/ssh/sshd_config.d /etc/sysctl.d /etc/profile.d
 # Make `agent` the cloud-init default user, so per-VM ssh_authorized_keys land there (also for VMs made
 # from this disk: snapshots and forks).
-cat >/etc/cloud/cloud.cfg.d/99-boxery.cfg <<'EOF'
+cat >/etc/cloud/cloud.cfg.d/99-boxery.cfg <<EOF
 system_info:
   default_user:
     name: agent
     gecos: boxery agent
-    groups: [sudo, adm]
+    groups: [$agent_groups]
     shell: /bin/bash
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     lock_passwd: true
@@ -82,4 +83,4 @@ install -o agent -g agent -m 644 /etc/skel/.tmux.conf /home/agent/.tmux.conf
 systemctl daemon-reload
 systemctl enable boxery-llm.service >/dev/null 2>&1
 systemctl enable qemu-guest-agent >/dev/null 2>&1 || true   # static unit on some releases
-systemctl reload ssh.service 2>/dev/null || true
+systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service 2>/dev/null || true

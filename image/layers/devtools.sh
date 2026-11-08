@@ -70,8 +70,11 @@ as_agent() { sudo -u agent -H env -i HOME=/home/agent PATH=/usr/local/sbin:/usr/
 # has no mark: its /usr/local node is ours unless the image is exeuntu, which has an exedev user).
 NODE_DL=$(mktemp -d)
 curl -fsSL -o "$NODE_DL/SHASUMS256.txt" https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt
-ARCH=$(dpkg --print-architecture)   # amd64 | arm64
-NODE_ARCH=$([ "$ARCH" = arm64 ] && echo arm64 || echo x64)
+case $(uname -m) in
+	aarch64 | arm64) NODE_ARCH=arm64 ;;
+	x86_64) NODE_ARCH=x64 ;;
+	*) echo "unsupported Node architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 NODE_SUM=$(awk -v a="linux-$NODE_ARCH.tar.xz" '$2 ~ a"$"' "$NODE_DL/SHASUMS256.txt")
 [ "$(printf '%s\n' "$NODE_SUM" | grep -c .)" = 1 ] || { echo "no single linux-$NODE_ARCH.tar.xz in Node's SHASUMS256.txt" >&2; exit 1; }
 NODE_LATEST=$(printf '%s\n' "${NODE_SUM##* }" | cut -d- -f2)   # node-v24.x.y-linux-ARCH.tar.xz → v24.x.y
