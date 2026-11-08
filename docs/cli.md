@@ -70,7 +70,7 @@ boxery pin demo [--from-guest]               # re-pin demo's ssh host key (a VM 
 
 ```bash
 boxery fork demo try-a try-b                 # copy demo (running or not) into 2 new VMs, ~15–25 s   [--grants] [--shape S]
-boxery snap demo before-refactor             # ~1 s, the VM keeps running
+boxery snap demo before-refactor             # ~1 s and live on libvirt; Lima restarts a running VM (~10 s)
 boxery snaps demo [--json]
 boxery revert demo before-refactor           # VM keeps its name, address and token
 boxery new demo2 --from demo@before-refactor # a new VM from a snapshot
@@ -80,7 +80,7 @@ boxery images                                # every snapshot on the host (with 
 
 A **fork** is a separate VM with the source's disk (files, installed packages, git state) but not its running processes, and with its own hostname, LLM proxy token, ssh keys and network identity. Forks don't depend on the source: removing either one is fine. Forks get the source's size (cpus, memory, disk) unless you pass `--shape` or size flags. Grants are per VM and aren't copied unless you pass `--grants`. That option revalidates the source grants and asks for each destination before creating anything; stale files or newly forbidden legacy grants must be revoked first (or omit `--grants`). A fork of a leased pool VM is an ordinary VM and never accepts the lease key.
 
-Snapshots and forks are built on one backend primitive, the image (a copy of a VM's disk named `VM@LABEL`). They hold disk state only, never memory, so secrets pushed by grants (tmpfs) are never captured. `rm` removes a VM's snapshots too. How each backend implements images: [backends](../host/backends/README.md#images-one-primitive-for-snapshots-forks-and-pool-resets).
+Snapshots and forks are built on one backend primitive, the image (a copy of a VM's disk named `VM@LABEL`). They hold disk state only, never memory, so secrets pushed by grants (tmpfs) are never captured. `rm` removes a VM's snapshots too. Capturing a running VM (`snap`, `fork`, `pool add`, `patch` of a pool VM) depends on the backend: libvirt does it live in about a second, exe.dev in about 12 s with the VM kept running, but **Lima stops the VM and starts it again** (about 10 s), because Lima clones only stopped instances, so its processes, tmux sessions and background jobs end. `boxery capabilities` (or `boxery backends --json`) shows this in the `diskSnapshots` note. How each backend implements images: [backends](../host/backends/README.md#images-one-primitive-for-snapshots-forks-and-pool-resets).
 
 ### Shell and in-VM agents
 
@@ -244,7 +244,7 @@ Generated from the help `boxery help` shows (`controller/cli.mjs`); edit it ther
 
 | Command | What it does |
 |---|---|
-| `boxery snap NAME [SNAP]` | Snapshot a VM's disk (~1 s; the VM keeps running) [→](#snapshots-and-forks) |
+| `boxery snap NAME [SNAP]` | Snapshot a VM's disk (Lima restarts a running VM) [→](#snapshots-and-forks) |
 | `boxery snaps NAME [--json]` | List a VM's snapshots |
 | `boxery revert NAME SNAP` | Restore a VM to a snapshot (keeps its name, address and token) |
 | `boxery snap-rm NAME SNAP` | Delete a snapshot |

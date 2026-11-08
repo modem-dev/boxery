@@ -153,7 +153,7 @@ export async function newVm(rt, args) {
 }
 
 // ---------------------------------------------------------------- fork
-// fork SRC DST... [--shape S] [--cpus N --mem MiB --disk GiB]: capture SRC once (it keeps running), then
+// fork SRC DST... [--shape S] [--cpus N --mem MiB --disk GiB]: capture SRC once (it keeps running; Lima restarts it), then
 // boot every DST from that image with its own identity (hostname, proxy token, ssh keys, network). Prints
 // "DST ADDR" per fork, like new. The capture is temporary: forks never depend on it. Forks get SRC's
 // recorded size unless --shape or a size flag is given (flags override SRC's size field by field).

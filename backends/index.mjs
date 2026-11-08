@@ -24,6 +24,7 @@ const capabilities = (requires = []) => ({
 	fork: yes(requires), restore: yes(requires), resize: yes([], "Disk only grows; running VMs may restart"),
 	pools: yes(requires), leases: yes(requires), guestSudo: yes(), grants: yes(),
 });
+const LIMA_CAPTURE = "a running VM is stopped and started again to capture it (~10 s on vz), so its processes, tmux sessions and jobs end";
 const kvm = { id: "/dev/kvm", kind: /** @type {const} */ ("device"), description: "Enable KVM and allow this host user access to /dev/kvm (kvm group)", setup: true };
 const paid = "Paid boat.dev saved-snapshot access";
 /** @type {Record<string, BackendMetadata>} */
@@ -41,7 +42,10 @@ export const BACKENDS = {
 		runtime: { location: "host", default: "platform", options: ["vz", "qemu"], platforms: { vz: both.filter((p) => p.os === "darwin"), qemu: both } },
 		requirements: [...tools(["limactl", "jq", "ssh"]), { ...manual("macOS confinement needs sandbox-exec unless BOXERY_LIMA_CONFINE=0"), when: { os: "darwin", arch: "*" } },
 			{ ...manual("Linux qemu: KVM recommended; without it Lima uses slow TCG emulation"), when: { os: "linux", arch: "*" } }],
-		capabilities: capabilities(),
+		// Lima clones only stopped instances: every capture (snap, fork, pool add, patch of a pool VM)
+		// restarts a running VM (#219).
+		capabilities: { ...capabilities(), diskSnapshots: yes([], `Disk only; not a memory checkpoint. On Lima ${LIMA_CAPTURE}`),
+			fork: yes([], `On Lima ${LIMA_CAPTURE}`), pools: yes([], `pool add: on Lima ${LIMA_CAPTURE}`) },
 	},
 	"cloud-hypervisor": {
 		id: "cloud-hypervisor", stability: "experimental", supported: linux,

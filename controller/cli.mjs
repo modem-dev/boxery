@@ -268,6 +268,8 @@ async function cmdSsh(s, [name = "", ...rest]) {
  *  @typedef {{ help: Help, run?: Command, preHost?: true } | { alias: string }} Entry */
 
 const JSON_FLAG = /** @type {[string, string]} */ (["--json", "Print JSON (fields: docs/cli.md#json-output)"]);
+// Captures differ by backend (#219; backends/index.mjs, diskSnapshots).
+const CAPTURE_NOTE = "Most backends capture a running VM live (libvirt and cloud-hypervisor in about a second, exe.dev in about 12 s); Lima stops it and starts it again (about 10 s on vz), so its processes, tmux sessions and jobs end.";
 const SIZE_FLAGS = /** @type {[string, string][]} */ ([["--shape S", "A size from boxery shapes"], ["--cpus N", "CPUs"], ["--mem MiB", "Memory, in MiB"], ["--disk GiB", "Disk, in GiB"]]);
 const RUN_RULES = "Arguments are passed exactly as given, like docker exec: quotes, $, ~, globs and ; are not re-parsed in the VM. For pipes, &&, ~ or $VAR, run a shell: bash -c '...'.";
 
@@ -355,7 +357,7 @@ export const COMMANDS = {
 	fork: {
 		help: {
 			group: "vms", summary: "copy a VM (running or not) into new VMs, ~10 s", usage: ["fork SRC DST... [--grants] [--shape S] [--cpus N --mem MiB --disk GiB]"],
-			details: ["Each fork has SRC's disk (not its processes) with its own hostname, LLM token, ssh keys and network identity, and SRC's size unless --shape or size flags say otherwise."],
+			details: ["Each fork has SRC's disk (not its processes) with its own hostname, LLM token, ssh keys and network identity, and SRC's size unless --shape or size flags say otherwise.", CAPTURE_NOTE],
 			flags: [["--grants", "Give the forks SRC's grants too (asks for each)"], ...SIZE_FLAGS],
 			examples: [["Two copies to try two approaches", "boxery fork demo try-a try-b"]], seeAlso: ["snap", "new"], docs: "cli.md#snapshots-and-forks",
 		},
@@ -389,7 +391,7 @@ export const COMMANDS = {
 
 	// ------------------------------------------------ snapshots
 	snap: {
-		help: { group: "snapshots", summary: "snapshot a VM's disk (~1 s; the VM keeps running)", usage: ["snap NAME [SNAP]"], seeAlso: ["snaps", "revert", "snap-rm"], docs: "cli.md#snapshots-and-forks" },
+		help: { group: "snapshots", summary: "snapshot a VM's disk (Lima restarts a running VM)", usage: ["snap NAME [SNAP]"], details: [CAPTURE_NOTE], seeAlso: ["snaps", "revert", "snap-rm"], docs: "cli.md#snapshots-and-forks" },
 		run: async (s, args) => {
 			needHost(s);
 			if (args[1] && !VALID_SNAP.test(args[1])) die(`invalid snapshot name: ${args[1]}`);

@@ -11,6 +11,8 @@ import * as help from "../help/index.mjs";
 /** @typedef {{ help: Help } | { alias: string }} Entry */
 
 const JSON_FLAG = /** @type {[string, string]} */ (["--json", "Print JSON (fields: docs/cli.md#json-output)"]);
+// Captures differ by backend (#219; backends/index.mjs, diskSnapshots).
+const CAPTURE_NOTE = "Most backends capture a running VM live (libvirt and cloud-hypervisor in about a second, exe.dev in about 12 s); Lima stops it and starts it again (about 10 s on vz), so its processes, tmux sessions and jobs end.";
 const SIZE_FLAGS = /** @type {[string, string][]} */ ([["--shape S", "A size from shapes"], ["--cpus N", "CPUs"], ["--mem MiB", "Memory, in MiB"], ["--disk GiB", "Disk, in GiB"]]);
 
 /** @type {Record<string, Entry>} */
@@ -52,7 +54,7 @@ export const HOST_COMMANDS = {
 	fork: {
 		help: {
 			group: "vms", summary: "copy a VM (running or not) into new VMs with their own identity", usage: ["fork SRC DST... [--shape S] [--cpus N --mem MiB --disk GiB]"],
-			details: ["Each fork has SRC's size unless --shape or size flags are given."], flags: SIZE_FLAGS, docs: "cli.md#snapshots-and-forks",
+			details: ["Each fork has SRC's size unless --shape or size flags are given.", CAPTURE_NOTE], flags: SIZE_FLAGS, docs: "cli.md#snapshots-and-forks",
 		},
 	},
 	ls: {
@@ -80,7 +82,7 @@ export const HOST_COMMANDS = {
 	},
 
 	// ------------------------------------------------ snapshots
-	snap: { help: { group: "snapshots", summary: "snapshot a VM's disk", usage: ["snap NAME [SNAP]"], docs: "cli.md#snapshots-and-forks" } },
+	snap: { help: { group: "snapshots", summary: "snapshot a VM's disk", usage: ["snap NAME [SNAP]"], details: [CAPTURE_NOTE], docs: "cli.md#snapshots-and-forks" } },
 	snaps: { help: { group: "snapshots", summary: "a VM's snapshots, with their age and guest software", usage: ["snaps NAME [--json]"], flags: [JSON_FLAG] } },
 	"snap-rm": { help: { group: "snapshots", summary: "delete a snapshot", usage: ["snap-rm NAME SNAP"] } },
 	revert: { help: { group: "snapshots", summary: "restore a VM to a snapshot", usage: ["revert NAME SNAP"] } },

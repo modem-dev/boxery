@@ -58,6 +58,15 @@ test("OpenShell upstream support is not Boxery validation or unrestricted guest 
 	assert.equal(report.requirements.find((r) => r.id === "node")?.status, "met", "pinned host Node needs no PATH entry");
 });
 
+test("Lima declares that captures restart a running VM (#219)", () => {
+	for (const f of ["diskSnapshots", "fork", "pools"]) {
+		const c = BACKENDS.lima.capabilities[f];
+		assert.equal(c.status, "supported");
+		assert.match(c.note, /stopped and started again/, f);
+	}
+	assert.doesNotMatch(BACKENDS.libvirt.capabilities.diskSnapshots.note, /started again/);
+});
+
 test("paid snapshot access is conditional, never inferred from an API key", () => {
 	const c = BACKENDS.boat.capabilities.diskSnapshots, req = c.requires[0];
 	assert.equal(capabilityStatus(c).availability, "unknown");

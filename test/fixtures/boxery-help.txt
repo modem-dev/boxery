@@ -21,7 +21,7 @@ VMs:
   shapes                        VM sizes defined on the host (* = default)
 
 Snapshots & images:
-  snap NAME [SNAP]              Snapshot a VM's disk (~1 s; the VM keeps running)
+  snap NAME [SNAP]              Snapshot a VM's disk (Lima restarts a running VM)
   snaps NAME                    List a VM's snapshots
   revert NAME SNAP              Restore a VM to a snapshot (keeps its name, address and token)
   snap-rm NAME SNAP             Delete a snapshot

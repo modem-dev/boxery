@@ -16,7 +16,7 @@ boxery pool add pool-2
 boxery pool ls
 ```
 
-`pool add` locks the VM down so that only lease holders can reach it. It ends existing ssh sessions, wipes pushed grants, and captures the `NAME@boxery-clean` image that each reset returns to. Works on every backend (libvirt and Lima, including Lima vz).
+`pool add` locks the VM down so that only lease holders can reach it. It ends existing ssh sessions, wipes pushed grants, and captures the `NAME@boxery-clean` image that each reset returns to. Works on every backend with pools (all but OpenShell), including Lima vz. On Lima the capture stops a running VM and starts it again, so whatever it was running ends.
 
 To take a VM out of the pool after its lease ends, run `boxery pool rm NAME`. It becomes a normal VM again. `--force` removes it even while it's leased.
 

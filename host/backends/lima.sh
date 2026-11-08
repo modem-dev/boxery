@@ -275,7 +275,7 @@ backend_capture() { # NAME IMAGE
 	lima_exists_inst "$i" || die "no such vm: $1"
 	lima_exists_inst "$im" && die "image $2 exists"
 	was=$(lima_status "$i")
-	[[ $was == Stopped ]] || log "stopping $1 to capture it (Lima clones stopped instances only)"
+	[[ $was == Stopped ]] || log "stopping $1 to capture it (Lima clones stopped instances only); its processes, tmux sessions and jobs end"
 	lima_stop "$i"
 	local rc=0; limactl clone --tty=false "$i" "$im" >/dev/null 2>&1 || rc=$?
 	if ((rc == 0)); then printf '%s\n%s\n' "$2" "$(date +%Y-%m-%dT%H:%M:%S)" >"$(lima_dir "$im")/boxery-image"; fi
