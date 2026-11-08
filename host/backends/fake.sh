@@ -16,7 +16,11 @@ backend_init() { mkdir -p "$FAKE"; }
 # A bridge unit name, like libvirt's (profile_unit), so tests see which one init enables. No file is written.
 backend_proxy_services() { echo "$(profile_unit boxery-fake-bridge).service"; }
 guest_proxy_upstream() { echo "TCP:fake-gateway:$PROXY_PORT"; }
-backend_build_base() { mkdir -p "$FAKE"; touch "$FAKE/.base"; }
+backend_build_base() {
+	mkdir -p "$FAKE"; touch "$FAKE/.base"
+	# Preserve the input actually consumed by this fixture; the host removes its private work file.
+	if [[ -n ${BASE_USERDATA:-} ]]; then cp "$BASE_USERDATA" "$FAKE/.base-user-data"; fi
+}
 backend_has_base() { [[ -f $FAKE/.base ]]; }
 backend_exists() { [[ -d $FAKE/$1 ]]; }
 # Each fake VM gets a unique "ssh port" so test ssh stubs can map a connection to its VM directory.

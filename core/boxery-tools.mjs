@@ -267,7 +267,7 @@ export const TOOLS = [
 			"`resize` changes an existing VM's cpus/mem/disk (disk only grows); a running VM restarts, so its processes and jobs end. `start`/`stop` power a VM on/off; disk state is kept. " +
 			"`snap` snapshots VM `vm` (as `snapshot`, optional); `revert` restores snapshot `snapshot` and `snap-rm` deletes it (see vm_info snaps). " +
 			"`use` makes `vm` the current VM (default for all vm_* tools; created if missing); `none` clears it. " +
-			"`build-base` builds the host's desktop base image (~3 min), which desktop VMs are created from; a new host needs it once (headless VMs don't). The host refuses while VMs depend on the current base. " +
+			"`build-base` builds the host's desktop base image (~3 min), which desktop VMs are created from; a new host needs it once (headless VMs don't). libvirt publishes a new base version without modifying existing backing disks; other backends may refuse while VMs depend on the current base. " +
 			"`host` selects a session host via host:NAME and clears the current VM (vm_info hosts lists them). " +
 			"`host_add` registers a new host: name (its alias), dest (`local` = the machine this agent's controller runs on, or an ssh destination such as user@box) and, " +
 			`to create a separate profile there for another VM platform, backend (${BACKENDS}; it gets its own state, proxy port and services), ` +

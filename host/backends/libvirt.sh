@@ -14,9 +14,31 @@ ISOLATION=${BOXERY_NET_ISOLATION:-on}     # guest network isolation (nwfilter); 
 NWFILTER=boxery-guest-isolation           # one filter for every profile; parameters are per interface
 # Pin effective defaults in operation journals, even if host.env changes before recovery.
 export BOXERY_POOL=$POOL BOXERY_POOL_DIR=$POOL_DIR BOXERY_BASE_VOL=$BASE_VOL BOXERY_STOCK_VOL=$STOCK_VOL BOXERY_DOMAIN_PREFIX=$PREFIX BOXERY_NET=$NET
+# Keep the configured alias stable in journals/host.env. Each backend invocation resolves it once;
+# every disk overlay records the actual immutable volume, never this movable pointer.
+BASE_ALIAS_VOL=$BASE_VOL
+BASE_POINTER="${CONF:-${BOXERY_CONF:-$HOME/.config/boxery}}/libvirt-base-$(printf '%s\0' "$LIBVIRT_DEFAULT_URI" "$POOL" "$BASE_ALIAS_VOL" | sha256sum | cut -c1-24).current"
+base_resolve() {
+	[[ -f $BASE_POINTER ]] || return 0   # upgrade: keep using the legacy base until first publication
+	local selected; selected=$(<"$BASE_POINTER")
+	[[ $selected == "${BASE_ALIAS_VOL%.qcow2}.v-"*.qcow2 && $selected =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid libvirt base pointer: $BASE_POINTER"
+	BASE_VOL=$selected
+}
+base_publish() { # fully built immutable volume -> atomic alias update, never deletes an older base
+	local selected=$1 tmp
+	mkdir -p "$(dirname "$BASE_POINTER")"
+	tmp=$(mktemp "$BASE_POINTER.XXXXXX")
+	printf '%s\n' "$selected" >"$tmp"
+	mv -f "$tmp" "$BASE_POINTER"
+}
+base_resolve
 dom() { echo "$PREFIX$1"; }
 exists() { virsh dominfo "$(dom "$1")" >/dev/null 2>&1; }
 
+upload_new_vol() { # immutable candidate: vol-create-as must fail rather than replace an existing disk
+	virsh vol-create-as "$POOL" "$2" "$(stat -c %s "$1")" --format "$3" >/dev/null || return 1
+	virsh vol-upload --pool "$POOL" "$2" "$1"
+}
 upload_vol() { # file vol format
 	local f=$1 v=$2 fmt=$3
 	virsh vol-delete --pool "$POOL" "$v" >/dev/null 2>&1 || true
@@ -250,33 +272,41 @@ dependents() { # VOL → count
 	done | wc -l | tr -d ' '
 }
 
-backend_build_base() {
-	local name=boxery-base-build
+backend_build_base() (
+	# A private builder and disk per attempt: concurrent builds never overwrite a live backing file,
+	# the existing base, each other's seed/log, or a builder owned by another profile.
+	local version candidate name seed logvol published=false
+	version=$(cat /proc/sys/kernel/random/uuid)
+	candidate="${BASE_ALIAS_VOL%.qcow2}.v-$version.qcow2"
+	[[ $candidate =~ ^[A-Za-z0-9._-]+$ ]] || die "base volume name must use letters, digits, dot, underscore or dash"
+	name="boxerybasebuild-$version"; seed="$name-seed.iso"; logvol="$name.log"
+	# Confirm absence; never pass an existing immutable volume to upload_vol's replacement path.
+	local inventory; inventory=$(virsh vol-list --pool "$POOL" --name) || die "cannot inspect base volumes"
+	! grep -qxF "$candidate" <<<"$inventory" || die "base version already exists: $candidate"
+	cleanup_builder() {
+		virsh destroy "$name" >/dev/null 2>&1 || true
+		virsh undefine "$name" >/dev/null 2>&1 || true
+		virsh vol-delete --pool "$POOL" "$seed" >/dev/null 2>&1 || true
+		# Retain the candidate and serial log on failure for diagnosis. Never GC backing disks here.
+		if "$published"; then virsh vol-delete --pool "$POOL" "$logvol" >/dev/null 2>&1 || true; fi
+	}
+	trap cleanup_builder EXIT
 	cloud_image
-	# Existing desktop VMs and their images are qcow2 overlays backed by $BASE_VOL; rewriting it would
-	# corrupt them. Headless VMs are backed by $STOCK_VOL and don't count.
-	local deps; deps=$(dependents "$BASE_VOL")
-	if virsh vol-info --pool "$POOL" "$BASE_VOL" >/dev/null 2>&1 && ((deps > 0)); then
-		die "$deps VM disk(s)/image(s) depend on $BASE_VOL; remove them first (versioned templates are planned, see ARCHITECTURE.md)"
-	fi
-	virsh destroy "$name" >/dev/null 2>&1 || true
-	virsh undefine "$name" >/dev/null 2>&1 || true
 	isolation_ensure_filter
 	local net; net=$(net_arg) || exit 1
 	log "uploading base disk"
-	upload_vol "$CACHE/noble.img" "$BASE_VOL" qcow2
-	virsh vol-resize --pool "$POOL" "$BASE_VOL" 20G >/dev/null
+	upload_new_vol "$CACHE/noble.img" "$candidate" qcow2
+	virsh vol-resize --pool "$POOL" "$candidate" 20G >/dev/null
 	local tmp; tmp=$(mktemp -d)
 	printf 'instance-id: boxery-base-%s\nlocal-hostname: boxery-base\n' "$(date +%s)" >"$tmp/meta-data"
 	cloud-localds "$tmp/seed.iso" "$BASE_USERDATA" "$tmp/meta-data"
-	upload_vol "$tmp/seed.iso" boxery-base-seed.iso raw
+	upload_new_vol "$tmp/seed.iso" "$seed" raw
 	rm -rf "$tmp"
-	virsh vol-delete --pool "$POOL" build.log >/dev/null 2>&1 || true
 	log "booting builder VM (installs XFCE, VNC, node, pi, opencode; ~5-10 min)"
 	virt-install --name "$name" --memory 8192 --vcpus 8 --osinfo ubuntu24.04 \
-		--disk "vol=$POOL/$BASE_VOL,bus=virtio,discard=unmap" --disk "vol=$POOL/boxery-base-seed.iso,device=cdrom" \
+		--disk "vol=$POOL/$candidate,bus=virtio,discard=unmap" --disk "vol=$POOL/$seed,device=cdrom" \
 		--network "$net" --graphics none \
-		--serial "pty,log.file=$POOL_DIR/build.log" \
+		--serial "pty,log.file=$POOL_DIR/$logvol" \
 		--events on_reboot=destroy --import --noautoconsole >/dev/null
 	local t=0
 	while [[ $(virsh domstate "$name" 2>/dev/null) == running ]]; do
@@ -286,17 +316,20 @@ backend_build_base() {
 	done
 	virsh pool-refresh "$POOL" >/dev/null
 	local blog; blog=$(mktemp)
-	virsh vol-download --pool "$POOL" build.log "$blog" >/dev/null 2>&1 || true
+	virsh vol-download --pool "$POOL" "$logvol" "$blog" >/dev/null 2>&1 || true
 	cp "$blog" "$CACHE/build.log" 2>/dev/null || true
 	virsh undefine "$name" >/dev/null
-	virsh vol-delete --pool "$POOL" boxery-base-seed.iso >/dev/null
+	virsh vol-delete --pool "$POOL" "$seed" >/dev/null
 	if grep -q BOXERY_BUILD_OK "$blog"; then
-		log "base image ready: $POOL/$BASE_VOL"
+		base_publish "$candidate"
+		published=true
+		log "base image ready: $POOL/$candidate (previous versions retained)"
 	else
 		tail -40 "$blog" >&2
 		die "base build failed; full serial log in $CACHE/build.log"
 	fi
-}
+	rm -f "$blog"
+)
 
 
 backend_has_base() { virsh vol-info --pool "$POOL" "$BASE_VOL" >/dev/null 2>&1; }

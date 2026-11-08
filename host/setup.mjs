@@ -1,7 +1,7 @@
 // One-time host setup: init (state directory, settings, proxy and reaper services), build-base and
 // add-key. Administrative: these run outside the lifecycle lock protocol (docs/lifecycle.md).
 import { spawn } from "node:child_process";
-import { accessSync, chmodSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
@@ -383,13 +383,12 @@ async function initProfile(rt, others) {
 export async function buildBase(rt) {
 	await rt.vms.call("backend_check");
 	// The desktop build's cloud-config: image/base-user-data.yaml with the layers filled in.
-	const file = path.join(rt.cache, "base-user-data.yaml");
 	mkdirSync(rt.cache, { recursive: true });
-	// A per-process temp name: concurrent build-bases share the cache, and a fixed one races the rename.
-	const tmp = `${file}.${process.pid}.tmp`;
-	writeFileSync(tmp, baseUserdata(rt.root, await rt.vms.layerFiles()));
-	renameSync(tmp, file);
-	await rt.vms.call("backend_build_base", [], { extraEnv: { BASE_USERDATA: file } });
+	const dir = mkdtempSync(path.join(rt.cache, "base-build-")), file = path.join(dir, "user-data.yaml");
+	try {
+		writeFileSync(file, baseUserdata(rt.root, await rt.vms.layerFiles()), { mode: 0o600 });
+		await rt.vms.call("backend_build_base", [], { extraEnv: { BASE_USERDATA: file } });
+	} finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
 /** Authorize a controller's ssh key (stdin) for VMs created from now on. @param {Runtime} rt */

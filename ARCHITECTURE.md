@@ -191,7 +191,7 @@ Inside the VM, everything listens on localhost (noVNC, CDP, the proxy bridge). T
 | VM deleted outside boxery | Inventory drift check: pool VM → `BROKEN`, token and edge routes revoked |
 | Stale ControlMaster after revert/stop/rm | The controller drops the master on lifecycle commands (only on the laptop that ran them) |
 | Guest clock frozen after revert | The host steps the guest clock over ssh (best effort) |
-| `build-base` while VMs depend on the base | libvirt refuses; versioned templates are planned |
+| `build-base` while VMs depend on the base | libvirt builds a new immutable volume and atomically publishes its pointer; older backing volumes remain (no automatic GC). Other backends keep their existing rules |
 
 ## Capacity and scale
 

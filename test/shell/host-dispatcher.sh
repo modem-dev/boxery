@@ -177,7 +177,7 @@ out=$("$H" new dx --from a2@d1 --headless 2>&1) && bad "--headless with a deskto
 BOXERY_FAKE_FAIL_NEW=1 "$H" new hlf --headless >/dev/null 2>&1 || true; [[ $(sql "SELECT count(*) n FROM vm_records WHERE name='hlf'") == '[{"n":0}]' && ! -d $BOXERY_FAKE_DIR/hlf ]] && ok "a failed headless new leaves no record" || bad "hlf leftovers"
 for n in hl2 hl3 hf df; do "$H" rm "$n" >/dev/null 2>&1; done
 # The desktop build's cloud-config: the template with every layer at its marker
-bu=$tmp/cache/base-user-data.yaml
+bu=$BOXERY_FAKE_DIR/.base-user-data
 out=$(BOXERY_CACHE=$tmp/cache "$H" build-base 2>&1) && [[ -f $bu ]] && ok "build-base writes the build cloud-config" || bad "build-base: $out"
 ! grep -q '@boxery-layers' "$bu" && [[ $(grep -c '^  - path: ' "$bu") == $(($(grep -c '^  - path: ' "$ROOT/image/base-user-data.yaml") + 6)) ]] && ok "...with the 6 layer files in place of the marker" || bad "layers not inserted: $(grep 'path:' "$bu")"
 node "$ROOT/host/cloudconfig-sh.mjs" "$bu" >"$tmp/files.sh" && grep -q '/usr/local/sbin/boxery-provision' "$tmp/files.sh" && grep -q '/usr/local/sbin/boxery-build.sh' "$tmp/files.sh" && ok "cloudconfig-sh.mjs (Lima, exe) reads it" || bad "cloudconfig-sh on the build config"
