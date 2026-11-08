@@ -316,6 +316,16 @@ describe("stdio", () => {
 		for (const from of ["fakevm", "fakevm@s1@x", "x;y@s1", "fakevm@-s"]) await err({ action: "new", vm: "x", from }, /invalid image/);
 	});
 
+	test("vm_manage applies an explicit recipe in the guest and records its content hash", async () => {
+		const recipe = path.join(dir, "recipe.json");
+		writeFileSync(recipe, JSON.stringify({ version: 1, kind: "headless", setup: "recipe-setup.sh" }));
+		writeFileSync(path.join(dir, "recipe-setup.sh"), "printf verified > recipe-proof\n");
+		const result = await c.tool("vm_manage", { action: "new", vm: "fakevm", recipe });
+		assert.notEqual(result.isError, true, result.content[0].text);
+		assert.equal(readFileSync(path.join(dir, "vm/project/recipe-proof"), "utf8"), "verified");
+		assert.match(JSON.parse(readFileSync(path.join(dir, "vm/.boxery/recipe.json"), "utf8")).sha256, /^[a-f0-9]{64}$/);
+	});
+
 	test("vm_manage new headless:true passes --headless; desktop tools refuse a headless VM", async () => {
 		assert.match((await c.tool("vm_manage", { action: "new", vm: "hl", headless: true })).content[0].text, /stub host new hl --headless$/m);
 		assert.match((await c.tool("vm_manage", { action: "new", vm: "dt", headless: false })).content[0].text, /stub host new dt$/m);
@@ -915,6 +925,9 @@ describe("http", () => {
 		const sid = r.headers.get("mcp-session-id");
 		assert.match((await r.json()).result.instructions, /vm_copy: .*`local:` endpoints are disabled/);
 		const h = { ...auth, "mcp-session-id": sid };
+		const recipe = (await (await post({ jsonrpc: "2.0", id: 30, method: "tools/call", params: { name: "vm_manage", arguments: { action: "new", vm: "fakevm", recipe: "/control-plane/recipe.json" } } }, h)).json()).result;
+		assert.equal(recipe.isError, true);
+		assert.match(recipe.content[0].text, /recipe files are disabled/);
 		const tools = (await (await post({ jsonrpc: "2.0", id: 2, method: "tools/list" }, h)).json()).result.tools;
 		assert.match(tools.find((t) => t.name === "vm_copy").description, /`local:` endpoints are disabled/);
 		const copy = async (args) => (await (await post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "vm_copy", arguments: args } }, h)).json()).result;

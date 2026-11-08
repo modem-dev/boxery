@@ -282,6 +282,7 @@ export const TOOLS = [
 				snapshot: { type: "string", description: "snapshot name for snap/revert/snap-rm" },
 				from: { type: "string", description: "for new: image to create the VM from, VM@SNAP (see vm_info images)" },
 				headless: { type: "boolean", description: "for new: no desktop (default false: XFCE desktop, Chrome, computer use)" },
+				recipe: { type: "string", description: "for new: explicit local recipe JSON path (on the controller), with reviewed guest setup script; no automatic grants or host code execution" },
 				distro: { type: "string", enum: ["ubuntu", "arch"], description: "for new: guest distribution; Arch is experimental, Lima x86_64 headless only" },
 				to: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "for fork: new VM name(s)" },
 				use: { type: "boolean", description: "for new: also make it the current VM" },
@@ -463,9 +464,10 @@ export async function infoAction(a, { host, current }) {
  * vm_manage on the call's host: VM lifecycle, plus the session's current VM and host (through the Session hooks).
  * Leased VMs can't be removed. progress: status lines from long controller operations (MCP progress).
  * @param {ManageArgs & { action: string, name?: string, dest?: string, backend?: string | null, profile?: string | null, buildBase?: boolean }} a
- * @param {{ session: Session, host: HostProfile, progress?: Progress }} ctx @returns {Promise<ToolResult>}
+ * @param {{ session: Session, host: HostProfile, progress?: Progress, localCopy?: LocalConfinement | false }} ctx @returns {Promise<ToolResult>}
  */
-export async function manageAction(a, { session: s, host, progress }) {
+export async function manageAction(a, { session: s, host, progress, localCopy }) {
+	if (a.recipe && localCopy !== undefined) throw new Error("local recipe files are disabled on HTTP/confined MCP; use the local CLI or stdio client");
 	switch (a.action) {
 		case "use": {
 			const vm = core.needVm(a);

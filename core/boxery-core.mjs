@@ -1173,7 +1173,7 @@ export function needVm(a) {
 
 /** vm_manage actions that don't touch "current VM" state (callers handle use/none). opts.progress: each line of output as it arrives. @param {ManageArgs} a @param {ProgressOpts} [opts] @returns {Promise<string>} */
 export async function manage(a, opts = {}) {
-	const { action, vm, snapshot, to, shape, from, cpus, mem, disk, headless, distro } = a;
+	const { action, vm, snapshot, to, shape, from, cpus, mem, disk, headless, distro, recipe } = a;
 	const need = () => needVm(a);
 	const size = () => {
 		for (const [k, v] of Object.entries({ cpus, mem, disk })) if (v != null && (!Number.isSafeInteger(v) || v < 1)) throw new Error(`${k} must be a positive integer`);
@@ -1190,7 +1190,7 @@ export async function manage(a, opts = {}) {
 		case "new":
 			{
 			const name = vm ? need() : newName();
-			return run((o) => lifecycle.newVm(name, { ...size(), from: from ? assertImage(from) : null, headless: !!headless, distro: typeof distro === "string" ? distro : undefined }, o), 300_000, `new ${name}`);
+			return run((o) => lifecycle.newVm(name, { ...size(), from: from ? assertImage(from) : null, headless: !!headless, distro: typeof distro === "string" ? distro : undefined, recipe: typeof recipe === "string" ? recipe : undefined }, o), 300_000, `new ${name}`);
 		}
 		case "rm":
 			return run((o) => lifecycle.rmVm(need(), o), 120_000, `rm ${need()}`);

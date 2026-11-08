@@ -6,9 +6,10 @@
 // Approval of grants (new --grant, fork --grants) belongs to the front-ends; these take approved specs.
 import { rmSync } from "node:fs";
 import path from "node:path";
-import { VALID_NAME, assertImage, assertName, assertSnap, currentHost } from "./boxery-core.mjs";
+import { VALID_NAME, assertImage, assertName, assertSnap, currentHost, execRemote } from "./boxery-core.mjs";
 import { addGrants, listGrants, reapplyPushed } from "./grant-operations.mjs";
 import { closeMaster, hostRun, profileConfig, writeSshConfig } from "./profile.mjs";
+import { loadRecipe, recipeCommand } from "./recipes.mjs";
 /** @import { GrantSpec } from "./boxery-core.mjs" */
 /** @import { HostRunOpts } from "./profile.mjs" */
 
@@ -56,15 +57,33 @@ function sizeArgs({ shape, cpus, mem, disk }) {
 /**
  * Create VM NAME. grants: approved specs, saved and applied once it exists.
  * @param {string} name @param {{ shape?: string | null, cpus?: number | string | null, mem?: number | string | null, disk?: number | string | null,
- *   from?: string | null, headless?: boolean, distro?: string | null, layers?: string | null, grants?: GrantSpec[] }} [spec] @param {LifecycleOpts} [opts]
+ *   from?: string | null, headless?: boolean, distro?: string | null, recipe?: string | null, layers?: string | null, grants?: GrantSpec[] }} [spec] @param {LifecycleOpts} [opts]
  */
-export async function newVm(name, { from, headless, distro, layers, grants = [], ...size } = {}, opts = {}) {
+export async function newVm(name, { from, headless, distro, recipe: recipeFile, layers, grants = [], ...size } = {}, opts = {}) {
 	assertName(name);
+	const recipe = recipeFile ? loadRecipe(recipeFile) : null;
+	if (recipe) {
+		if (from || layers) throw new Error("--recipe cannot be combined with --from or --layers");
+		if (headless && recipe.config.kind !== "headless") throw new Error("--headless conflicts with the recipe's desktop kind");
+		if (distro && distro !== recipe.config.distro) throw new Error("--distro conflicts with the recipe; put the distribution in the recipe");
+		headless = recipe.config.kind === "headless";
+		distro = recipe.config.distro;
+	}
 	if (from != null) assertImage(from);
 	if (distro != null && !["ubuntu", "arch"].includes(distro)) throw new Error("--distro must be ubuntu or arch");
 	if (distro && from) throw new Error("--distro cannot be combined with --from");
 	if (layers != null && !/^[a-z0-9,-]+$/.test(layers)) throw new Error(`invalid layer list: ${layers}`);
 	const out = await host(["new", name, ...(headless ? ["--headless"] : []), ...(distro ? ["--distro", distro] : []), ...(layers != null ? ["--layers", layers] : []), ...sizeArgs(size), ...(from ? ["--from", from] : [])], opts);
+	if (recipe) {
+		opts.log?.(`${name}: applying recipe ${recipe.sha256.slice(0, 12)} as agent`);
+		try {
+			const result = await execRemote(name, recipeCommand(recipe), null, { signal: opts.signal, timeout: 600,
+				onData: (d) => { if (opts.onData) opts.onData(d, "stderr"); else opts.log?.(d.toString()); } });
+			if (result.exitCode !== 0) throw new Error(`setup exited ${result.exitCode}`);
+		} catch (e) {
+			throw new Error(`recipe failed for ${name}; VM retained for inspection, new grants not applied: ${/** @type {Error} */ (e).message}`);
+		}
+	}
 	if (grants.length) sayer(opts)?.(await addGrants(name, grants, { interactiveCommands: opts.stdin === "inherit" }));
 	return out;
 }
