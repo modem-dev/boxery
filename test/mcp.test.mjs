@@ -961,7 +961,7 @@ describe("http", () => {
 		assert.deepEqual(events.filter((e) => e.method === "notifications/progress").map((e) => e.params.message), ["one", "two"]);
 		assert.match(events.at(-1).result.content[0].text, /one\ntwo/);
 		const asNotification = await post({ jsonrpc: "2.0", method: "tools/call", params: { name: "vm_bash", arguments: { command: "true" }, _meta: { progressToken: "n" } } }, { ...auth, "mcp-session-id": sid });
-		assert.equal(asNotification.status, 202, "a tools/call without id gets no stream");
+		assert.equal(asNotification.status, 400, "tools/call requires an ID so work is tracked, bounded and cancellable");
 		const noSse = await post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "vm_bash", arguments: { command: "echo x" }, _meta: { progressToken: "q" } } }, { ...auth, "mcp-session-id": sid, accept: "application/json" });
 		assert.match(/** @type {string} */ (noSse.headers.get("content-type")), /application\/json/);
 		assert.match((await noSse.json()).result.content[0].text, /x/);
@@ -1151,5 +1151,75 @@ describe("http vm_copy --copy-root", () => {
 		assert.ok(!existsSync(path.join(home, "work/hl")));
 		// No staging directories are left behind.
 		assert.deepEqual(readdirSync(path.join(home, "work")).filter((f) => f.startsWith(".boxery-copy-")), []);
+	});
+});
+
+describe("HTTP resource bounds", () => {
+	let process_, url;
+	const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: "Bearer bounded" };
+	const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {} } };
+	const post = (body, sid) => fetch(`${url}/mcp`, { method: "POST", headers: { ...headers, ...(sid ? { "mcp-session-id": sid } : {}) }, body: JSON.stringify(body) });
+	before(async () => {
+		const port = 20000 + Math.floor(Math.random() * 20000); url = `http://127.0.0.1:${port}`;
+		process_ = spawn(process.execPath, [SERVER, "--http", `127.0.0.1:${port}`, "--vm", "fakevm"], { env: { ...env, BOXERY_MCP_TOKEN: "bounded",
+			BOXERY_MCP_MAX_SESSIONS: "2", BOXERY_MCP_SESSION_IDLE_SECONDS: "1", BOXERY_MCP_MAX_BATCH: "2", BOXERY_MCP_MAX_INFLIGHT: "1", BOXERY_MCP_MAX_SESSION_INFLIGHT: "1" }, stdio: "ignore" });
+		for (let i = 0; i < 50; i++) {
+			try { if ((await fetch(`${url}/healthz`)).ok) return; } catch {}
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		throw new Error("bounded HTTP server did not start");
+	});
+	after(() => process_?.kill());
+
+	test("reject invalid, oversized and repeated initialization before allocating sessions", async () => {
+		for (const body of [[], [init, init, init], [init, { jsonrpc: "2.0", id: 2, method: "ping" }], null, 42, { jsonrpc: "2.0", id: {}, method: "ping" }, { jsonrpc: "2.0", method: "tools/call" }]) {
+			assert.equal((await post(body)).status, 400);
+		}
+		const first = await post(init), sid = first.headers.get("mcp-session-id");
+		assert.equal(first.status, 200); assert.ok(sid);
+		assert.equal((await post(init, sid)).status, 400);
+		assert.equal((await post([{ jsonrpc: "2.0", id: 2, method: "ping" }, { jsonrpc: "2.0", id: 2, method: "ping" }], sid)).status, 400);
+		const second = await post(init), sid2 = second.headers.get("mcp-session-id");
+		assert.equal(second.status, 200); assert.ok(sid2);
+		assert.equal((await post(init)).status, 429);
+		await fetch(`${url}/mcp`, { method: "DELETE", headers: { ...headers, "mcp-session-id": sid } });
+		await fetch(`${url}/mcp`, { method: "DELETE", headers: { ...headers, "mcp-session-id": sid2 } });
+		assert.equal((await post({ jsonrpc: "2.0", id: 3, method: "ping" }, sid)).status, 404);
+	});
+
+	test("limit tool work but admit control traffic; busy sessions survive TTL and idle ones expire", async () => {
+		const sid = (await post(init)).headers.get("mcp-session-id");
+		const sid2 = (await post(init)).headers.get("mcp-session-id");
+		const call = { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "vm_bash", arguments: { command: "echo running; sleep 2.5; echo done" }, _meta: { progressToken: "bounded" } } };
+		const slow = await post(call, sid);
+		assert.equal(slow.status, 200);
+		assert.equal((await post({ ...call, id: 10 }, sid)).status, 429);
+		assert.equal((await post({ ...call, id: 10 }, sid2)).status, 429, "global tool limit spans sessions");
+		assert.equal((await post({ jsonrpc: "2.0", id: 11, method: "ping" }, sid)).status, 200, "control messages have a lane even at tool capacity");
+		await new Promise((r) => setTimeout(r, 1200));
+		assert.equal((await post({ jsonrpc: "2.0", id: 12, method: "ping" }, sid)).status, 200, "active tool protects a busy session from idle eviction");
+		assert.match(await slow.text(), /done/);
+		assert.equal((await post({ jsonrpc: "2.0", id: 13, method: "ping" }, sid)).status, 200);
+		await new Promise((r) => setTimeout(r, 1200));
+		assert.equal((await post({ jsonrpc: "2.0", id: 14, method: "ping" }, sid)).status, 404);
+		assert.equal((await post(init)).status, 200, "idle eviction reclaims capacity");
+	});
+
+	test("DELETE aborts active tool work and immediately invalidates the session", async () => {
+		const sid = (await post(init)).headers.get("mcp-session-id"); assert.ok(sid);
+		const slow = await post({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "vm_bash", arguments: { command: "echo deleting; sleep 20; echo unexpected-completion" }, _meta: { progressToken: "delete" } } }, sid);
+		assert.equal(slow.status, 200);
+		assert.equal((await fetch(`${url}/mcp`, { method: "DELETE", headers: { ...headers, "mcp-session-id": sid } })).status, 204);
+		assert.equal((await post({ jsonrpc: "2.0", id: 21, method: "ping" }, sid)).status, 404);
+		const events = (await slow.text()).split("\n\n").filter(Boolean).map((e) => JSON.parse(e.replace(/^event: message\ndata: /, "")));
+		assert.equal(events.at(-1).result.isError, true);
+		assert.doesNotMatch(events.at(-1).result.content[0].text, /unexpected-completion/);
+	});
+
+	test("invalid limit settings fail at startup", async () => {
+		for (const value of ["0", "-1", "garbage", "1000001"]) {
+			const child = spawn(process.execPath, [SERVER, "--http", "127.0.0.1:1"], { env: { ...env, BOXERY_MCP_TOKEN: "bounded", BOXERY_MCP_MAX_SESSIONS: value }, stdio: "ignore" });
+			assert.notEqual(await new Promise((r) => child.on("exit", r)), 0);
+		}
 	});
 });

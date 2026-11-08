@@ -8,6 +8,8 @@
 //              optional --allow-user a@b.c (checks Tailscale-User-Login from `tailscale serve`)
 //   --ui   offer vm_view (live desktop view) even to clients that don't advertise MCP Apps support
 //   --copy-root DIR   allow vm_copy local: paths only inside DIR (never boxery's config, ~/.ssh, ~/.pi)
+//   HTTP bounds (positive integers): BOXERY_MCP_MAX_SESSIONS=64, BOXERY_MCP_SESSION_IDLE_SECONDS=1800,
+//     BOXERY_MCP_MAX_BATCH=32, BOXERY_MCP_MAX_INFLIGHT=64, BOXERY_MCP_MAX_SESSION_INFLIGHT=16.
 //
 // "local" (vm_copy) and grant sources are the machine this server runs on. Over HTTP that is the
 // control plane, so vm_copy local: endpoints are refused unless --copy-root confines them.
@@ -209,6 +211,7 @@ function progressReporter(token, notify, tool) {
 /** @param {Session} session */
 async function endSession(session) {
 	allSessions.delete(session);
+	for (const ac of session.inflight.values()) ac.abort();
 	await session.keeper.releaseAll();
 }
 
@@ -343,6 +346,7 @@ async function handle(session, msg, notify) {
 				} finally {
 					reporter?.stop();
 					session.inflight.delete(id);
+					session.lastActive = Date.now();
 				}
 			}
 			default:
@@ -414,8 +418,30 @@ function serveHttp(listen) {
 	const allowOrigins = argv.flatMap((a, i) => (a === "--allow-origin" ? [argv[i + 1]] : []));
 	/** @type {Map<string, Session>} */
 	const sessions = new Map();
+	const bound = (/** @type {string} */ name, /** @type {number} */ fallback) => {
+		const raw = process.env[name];
+		if (raw === undefined) return fallback;
+		if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) > 1_000_000) throw new Error(`${name} must be a positive integer <= 1000000`);
+		return Number(raw);
+	};
+	const maxSessions = bound("BOXERY_MCP_MAX_SESSIONS", 64);
+	const idleMs = bound("BOXERY_MCP_SESSION_IDLE_SECONDS", 1800) * 1000;
+	const maxBatch = bound("BOXERY_MCP_MAX_BATCH", 32);
+	const maxInflight = bound("BOXERY_MCP_MAX_INFLIGHT", 64);
+	const maxSessionInflight = bound("BOXERY_MCP_MAX_SESSION_INFLIGHT", 16);
+	let activeTools = 0;
+	const reapIdle = () => {
+		for (const [id, s] of sessions) {
+			if (s.inflight.size || s.pending.size || Date.now() - s.lastActive < idleMs) continue;
+			sessions.delete(id);
+			void endSession(s).catch((e) => log("idle session cleanup failed", e.message));
+		}
+	};
+	const sweep = setInterval(reapIdle, Math.min(idleMs, 30_000));
+	sweep.unref();
 
 	const server = http.createServer(async (req, res) => {
+		let reservedTools = 0;
 		/** @param {number} status @param {unknown} body @param {Record<string, string>} [headers] */
 		const send = (status, body, headers = {}) => {
 			res.writeHead(status, { "content-type": "application/json", ...headers });
@@ -462,14 +488,36 @@ function serveHttp(listen) {
 				return send(400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
 			}
 			const msgs = Array.isArray(msg) ? msg : [msg];
+			if (!msgs.length || msgs.length > maxBatch) return send(400, { error: `batch must contain 1..${maxBatch} messages` });
+			const ids = new Set();
+			for (const m of msgs) {
+				const response = m && typeof m === "object" && ("result" in m || "error" in m);
+				if (!m || Array.isArray(m) || typeof m !== "object" || m.jsonrpc !== "2.0" ||
+					(response ? m.method !== undefined || m.id == null : typeof m.method !== "string") ||
+					(m.id != null && typeof m.id !== "string" && !(typeof m.id === "number" && Number.isFinite(m.id))) ||
+					(m.method === "tools/call" && m.id == null)) return send(400, { error: "invalid JSON-RPC message" });
+				if (m.id != null) {
+					if (ids.has(m.id)) return send(400, { error: "duplicate request ID in batch" });
+					ids.add(m.id);
+				}
+			}
+			reapIdle();
 			let session;
-			if (msgs.some((m) => m?.method === "initialize")) {
+			if (msgs.some((m) => m.method === "initialize")) {
+				if (sid || msgs.length !== 1 || msgs[0].id == null) return send(400, { error: "initialize must be a single request without a session ID" });
+				if (sessions.size >= maxSessions) return send(429, { error: "session capacity reached; close an existing session or retry after idle expiry" }, { "retry-after": "1" });
 				session = newSession();
 				sessions.set(session.id, session);
 			} else {
 				session = sid && sessions.get(sid);
 				if (!session) return send(404, { jsonrpc: "2.0", id: null, error: { code: -32001, message: "unknown or missing Mcp-Session-Id; re-initialize" } });
 			}
+			const toolCount = msgs.filter((m) => m.method === "tools/call").length;
+			if (toolCount && (activeTools + toolCount > maxInflight || session.inflight.size + toolCount > maxSessionInflight)) {
+				return send(429, { error: "tool concurrency limit reached" }, { "retry-after": "1" });
+			}
+			if (msgs.some((m) => m.method === "tools/call" && session.inflight.has(m.id))) return send(409, { error: "request ID is already active" });
+			activeTools += toolCount; reservedTools = toolCount;
 			res.on("close", () => {
 				if (!res.writableEnded) for (const m of msgs) session.inflight.get(m?.id)?.abort();
 			});
@@ -491,8 +539,11 @@ function serveHttp(listen) {
 			log("error", e?.stack ?? e);
 			if (!res.headersSent) send(500, { error: String(e?.message ?? e) });
 			else res.end(); // mid-SSE: close the stream rather than leave it hanging
+		} finally {
+			activeTools -= reservedTools;
 		}
 	});
+	server.on("close", () => clearInterval(sweep));
 	server.requestTimeout = 0;
 	server.listen(Number(portPart), hostPart, () =>
 		log(`http ready on http://${hostPart}:${portPart}/mcp (auth: ${noAuth ? "none" : "bearer"}${allowUsers.length ? `, tailnet users: ${allowUsers.join(",")}` : ""}; vm_copy local: ${COPY_ROOT ? `confined to ${COPY_ROOT}` : "disabled"})`),

@@ -77,6 +77,35 @@ With `--copy-root DIR`, `local:` paths are confined to `DIR`:
 
 The `initialize` instructions and the `vm_copy` description tell the agent which of the two applies. stdio mode is unchanged: there `local:` is your own machine. `--copy-root` confines it there too, if you want that.
 
+### HTTP resource bounds
+
+Authenticated clients still share one control plane. HTTP mode now defaults to:
+
+| Environment setting | Default | Bounds |
+| --- | --- | --- |
+| `BOXERY_MCP_MAX_SESSIONS` | 64 | retained sessions |
+| `BOXERY_MCP_SESSION_IDLE_SECONDS` | 1800 | idle lifetime (seconds) |
+| `BOXERY_MCP_MAX_BATCH` | 32 | JSON-RPC messages per POST |
+| `BOXERY_MCP_MAX_INFLIGHT` | 64 | concurrent tool calls across HTTP sessions |
+| `BOXERY_MCP_MAX_SESSION_INFLIGHT` | 16 | concurrent tool calls in one session |
+
+Settings must be positive integers no greater than 1,000,000. Capacity/concurrency refusals return
+HTTP 429 with `Retry-After: 1`. Control messages (ping, cancellation, elicitation answers and DELETE)
+aren't blocked by the tool-work quota. Empty/oversized batches, malformed envelopes, duplicate batch
+IDs and untracked `tools/call` notifications are refused with 400; active tool IDs cannot be reused
+(409). Initialization must be a single request without an existing session ID, preventing repeated
+initialization from abandoning another session.
+
+Idle sessions are checked periodically and on admission. They are forgotten and their leases released;
+a later request gets 404 and must initialize again. A running tool or pending elicitation protects a
+session from idle eviction; completed tools refresh activity. DELETE aborts active tool calls before
+releasing leases. Aborting is existing transport cancellation, not a stronger lease-fencing boundary.
+
+These are process-local resource bounds, **not** per-user authorization, a rate limiter, per-VM spend
+budgets or a complete denial-of-service defense. The existing 32 MiB body limit remains; slow-upload/
+connection bounds and complete runtime tool-schema validation still need separate hardening. stdio
+transport retains its existing admission behavior.
+
 ## Protocol features
 
 The server speaks MCP `2024-11-05` through `2025-11-25` and sends newer fields only to clients that negotiated them, so older clients see the same responses as before.
@@ -137,7 +166,7 @@ Every call accepts optional `host` and `vm`, using the session selection by defa
 
 `acquire` waits up to `wait` seconds (default 60, at most 3600) for a free pool VM, leases it for `ttl` seconds (60–28800, default 1800) and makes it the current VM unless `use` is false. `renew` and `release` take `vm` (default: the current VM). A leased VM can't be removed with `vm_manage rm`.
 
-Leases belong to the MCP session that acquired them. The server renews each one at a third of its TTL while the session is in use, meaning a call is running or one ran within the TTL. They're released when the session ends: stdin closes (stdio), the client sends `DELETE` (HTTP), or the server gets SIGINT/SIGTERM/SIGHUP. An HTTP client that disappears without `DELETE` stops renewing, and the host's reaper resets the VM when the lease expires. A release or expiry resets the VM to its clean image, so anything not copied out is lost. If a renewal fails (the lease expired, or the host rebooted), the lease is dropped and stops being the current VM.
+Leases belong to the MCP session that acquired them. The server renews each one at a third of its TTL while the session is in use, meaning a call is running or one ran within the TTL. They're released when the session ends: stdin closes (stdio), the client sends `DELETE` (HTTP), or the server gets SIGINT/SIGTERM/SIGHUP. An HTTP client that disappears without `DELETE` stops renewing; the host's reaper resets the VM when its lease expires, or idle-session cleanup releases it earlier. A release or expiry resets the VM to its clean image, so anything not copied out is lost. If a renewal fails (the lease expired, or the host rebooted), the lease is dropped and stops being the current VM.
 
 ## Atomic file edits
 
