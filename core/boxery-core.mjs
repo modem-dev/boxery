@@ -422,10 +422,10 @@ export async function sshOk(vm, script, opts = {}) {
  *  agent's host session), else `boxery COMMAND`, as host/util.mjs hint does for the host's own messages.
  *  @param {string} command e.g. "ls" */
 export function cliHint(command) {
-	const name = currentHost().name;
-	let def = null;
+	let name = null, def = null;
+	try { name = currentHost().name; } catch { /* no host selected (formatting alone): plain boxery */ }
 	try { def = defaultHost(); } catch { /* a malformed default-host file must not replace the message */ }
-	return `boxery${/^boxery --host /.test(process.env.BOXERY_CLI ?? "") || name !== def ? ` --host ${name}` : ""} ${command}`;
+	return `boxery${name && (/^boxery --host /.test(process.env.BOXERY_CLI ?? "") || name !== def) ? ` --host ${name}` : ""} ${command}`;
 }
 
 /** What the host says of a VM it doesn't have, and where to look. @param {string} vm */
