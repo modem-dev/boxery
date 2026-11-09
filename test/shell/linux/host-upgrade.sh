@@ -9,7 +9,7 @@ set -euo pipefail
 node --disable-warning=ExperimentalWarning -e 'require("node:sqlite")' 2>/dev/null || { echo "SKIP: node:sqlite unavailable (need Node >= 22.13)"; exit 0; }
 [[ $(uname) == Linux ]] || { echo "SKIP: systemd-unit layout (launchd parsing is covered by test/upgrade.test.mjs)"; exit 0; }
 command -v git >/dev/null || { echo "SKIP: git unavailable"; exit 0; }
-SRC=$(cd "$(dirname "$0")/../.." && pwd)
+SRC=$(cd "$(dirname "$0")/../../.." && pwd)
 tmp=$(mktemp -d)
 proxies=()
 cleanup() { [ -n "${KEEP:-}" ] && { echo "kept $tmp"; return; }; for p in "${proxies[@]}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$tmp"; }

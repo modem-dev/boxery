@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Recovery hooks against command doubles only: never invoke real libvirt/Lima.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export BOXERY_POOL=test BOXERY_POOL_DIR=$tmp/pool BOXERY_DOMAIN_PREFIX=boxery- BOXERY_LIMA_PREFIX=boxery-
 die() { echo "$*" >&2; exit 1; }

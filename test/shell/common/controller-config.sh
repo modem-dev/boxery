@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Local-only config regression test; no network or VM needed.
 set -eu
-CLI="$(cd "$(dirname "$0")/../.." && pwd)/controller/boxery"
+CLI="$(cd "$(dirname "$0")/../../.." && pwd)/controller/boxery"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export BOXERY_HOME="$tmp/config" HOME="$tmp/home"
 P="$tmp/profile"
 mkdir -p "$BOXERY_HOME" "$HOME/.ssh" "$tmp/bin" "$P"
 printf "HOST='test-host'\nGRANT_CONFIRM=off\n" >"$P/config"; : >"$P/ssh_config"
-bash "$(cd "$(dirname "$0")/../.." && pwd)/controller/boxery" host add test-host --config-dir "$P" >/dev/null
+bash "$(cd "$(dirname "$0")/../../.." && pwd)/controller/boxery" host add test-host --config-dir "$P" >/dev/null
 printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/ssh"
 chmod +x "$tmp/bin/ssh"
 printf 'test public key\n' > "$tmp/key.pub"

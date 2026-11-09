@@ -4,7 +4,7 @@
 # image/layers/github-runner.sh's pins and its boxery-runner helper, run here with stand-ins for sudo,
 # systemd-run and the runner itself. The manager's policy and a full run: test/runners.test.mjs.
 set -eu
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 H=$ROOT/host/boxery-host A=$ROOT/controller/boxery LAYER=$ROOT/image/layers/github-runner.sh
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export HOME=$tmp/home BOXERY_CONF=$tmp/conf BOXERY_HOME=$tmp/ctl BOXERY_BACKEND=fake BOXERY_FAKE_DIR=$tmp/vms CALLS=$tmp/calls

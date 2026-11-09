@@ -74,14 +74,14 @@ This lets tests assert ordering directly. In particular, reset cannot publish FR
 
 Documented CLI arguments, listing output (tables and JSON), environment overrides, pool state semantics, the intent journal format and backend contracts are unchanged by the move to Node. Lease command stdout stays machine-readable (`NAME LEASE_ID EXPIRES_AT` for acquire; `NAME EXPIRES_AT` for renew); diagnostics stay on stderr. The controller needs Node ≥ 22.13 and ssh (and bash, for its entry shim and for a computed profile config).
 
-- `test/shell/host-output.sh`: exact output of listings, usage and common errors.
+- `test/shell/logic/host-output.sh`: exact output of listings, usage and common errors.
 - `test/lease-workflows.test.mjs`: injected policy tests, no SQLite or subprocesses, so they also run on a Node without `node:sqlite`.
 - `test/leases.test.mjs`: real SQLite transaction/state tests, schema migrations; `test/vm-records.test.mjs`: each VM's record.
 - `test/operations.test.mjs`: real dispatcher/supervisor crash tests against the fake backend, plus runtime parsing and callback-boundary checks.
 - `test/host-backend.test.mjs`, `test/host-shapes.test.mjs`, `test/host-seed.test.mjs`, `test/host-setup.test.mjs`: the backend shim, guest ssh, configuration, shapes, seed and service files, without SQLite.
-- `test/shell/host-init.sh`: `init`, `add-key` and `build-base` with stubbed service managers.
-- `test/runners.test.mjs`: the GitHub runner manager's policy with injected pool/guest/GitHub fakes, the REST client against a local stub server, and a full `boxery-host runners run` against the fake backend; `test/shell/host-runners.sh`: the `runners` CLI, the controller passthrough, and the guest layer's `boxery-runner`; `test/shell/controller-runners-once.sh`: `boxery runners once` end to end with a stub `gh` (the JIT config only ever on stdin, cleanup after a job, Ctrl-C, a refused registration and a killed controller).
+- `test/shell/common/host-init.sh`: `init`, `add-key` and `build-base` with stubbed service managers.
+- `test/runners.test.mjs`: the GitHub runner manager's policy with injected pool/guest/GitHub fakes, the REST client against a local stub server, and a full `boxery-host runners run` against the fake backend; `test/shell/common/host-runners.sh`: the `runners` CLI, the controller passthrough, and the guest layer's `boxery-runner`; `test/shell/common/controller-runners-once.sh`: `boxery runners once` end to end with a stub `gh` (the JIT config only ever on stdin, cleanup after a job, Ctrl-C, a refused registration and a killed controller).
 - `test/bench/host-timings.sh`: not a test; mean timings of common commands, to compare before and after a change.
-- `test/shell/*.sh`: controller, backend and CLI integration contracts; also run under Bash 3.2 for the parts still in Bash (entry shims, `connect`, backends, sourced profile configs).
+- `test/shell/*/*.sh`: controller, backend and CLI integration contracts; also run under Bash 3.2 for the parts still in Bash (entry shims, `connect`, backends, sourced profile configs).
 
 See [Lifecycle coordination and recovery](lifecycle.md) for the locking, recovery and upgrade contract.

@@ -4,7 +4,7 @@
 # limactl and sandbox-exec are command doubles; on macOS the generated profile is also run for real
 # against two loopback listeners (no VMs).
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 tmp=$(mktemp -d); lsn=""
 trap '[[ -z $lsn ]] || kill "$lsn" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 export BOXERY_CONF=$tmp/conf BOXERY_CACHE=$tmp/cache BOXERY_BACKEND=lima BOXERY_PROXY_PORT=9999 BOXERY_LIMA_PREFIX=boxery- CALLS=$tmp/calls.log STATE=$tmp/lima

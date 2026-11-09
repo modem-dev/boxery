@@ -3,7 +3,7 @@
 # `ssh -G`), the host's known-hosts/pin commands against the fake backend, and a real ssh connection to a
 # throwaway sshd on loopback that presents the wrong key. No VMs, no network beyond 127.0.0.1.
 set -eu
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CLI=$ROOT/controller/boxery
 H=$ROOT/host/boxery-host
 REAL_SSH=$(command -v ssh) || { echo "SKIP: no ssh client"; exit 0; }

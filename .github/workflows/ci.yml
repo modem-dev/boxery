@@ -47,7 +47,9 @@ jobs:
             apk add -q --no-cache openssh-client jq coreutils openssl nodejs perl git procps-ng >/dev/null
             cp -r /src /w && cd /w && bash test/shell/run.sh'
 
-  # The macOS suites run as separate jobs so they overlap; together they were the slowest job by far.
+  # The macOS jobs are the slowest, so they run only what macOS can break: BSD userland and the
+  # darwin code paths. bash 3.2 is covered in full by bash32. The macOS suites run as separate jobs so
+  # they overlap.
   macos-shell:
     runs-on: macos-latest
     steps:
@@ -55,7 +57,8 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
       - run: /bin/bash --version | head -1
-      - run: BASH_UNDER_TEST=/bin/bash /bin/bash test/shell/run.sh
+      # common/ only: linux/ is Linux-only code, logic/ runs the same on any OS (test/shell/run.sh)
+      - run: BASH_UNDER_TEST=/bin/bash /bin/bash test/shell/run.sh common
 
   macos-node:
     runs-on: macos-latest
@@ -63,7 +66,5 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
-      # The fake-VM MCP jobs tests execute tmux locally; macOS runners omit it.
-      - run: brew install tmux
-        env: { HOMEBREW_NO_AUTO_UPDATE: 1, HOMEBREW_NO_INSTALL_CLEANUP: 1, HOMEBREW_NO_ANALYTICS: 1 }
-      - run: npm test
+      # jobs.test.mjs tests the job runner that runs in (Linux) VMs; MCP vm_jobs is in mcp.test.mjs.
+      - run: node --test $(ls test/*.test.mjs | grep -v '/jobs\.test\.mjs$')

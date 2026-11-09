@@ -4,7 +4,7 @@
 # sandboxes as `user` (checking the pinned host key) and accepts the boxery-host → guest sshd hops
 # (agent@127.0.0.1 through the tunnel). systemctl, launchctl and nc are stubbed as in host-exe-backend.sh.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 H=$ROOT/host/boxery-host
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export BOXERY_CONF=$tmp/conf BOXERY_CACHE=$tmp/cache BOXERY_BACKEND=boat BOXERY_BOAT_DIR=$tmp/boat BOXERY_BOAT_PREFIX=bxtest- BOXERY_BOAT_SUPERVISOR=systemd

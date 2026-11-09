@@ -6,7 +6,7 @@
 # the registration deleted (where the controller can) and the VM released and reset.
 set -euo pipefail
 node --disable-warning=ExperimentalWarning -e 'require("node:sqlite")' 2>/dev/null || { echo "SKIP: node:sqlite unavailable (need Node >= 22.13)"; exit 0; }
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 H=$ROOT/host/boxery-host A=$ROOT/controller/boxery
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export HOME=$tmp/home BOXERY_CONF=$tmp/conf BOXERY_HOME=$tmp/ctl BOXERY_BACKEND=fake BOXERY_FAKE_DIR=$tmp/vms BOXERY_PROXY_PORT=9999 \

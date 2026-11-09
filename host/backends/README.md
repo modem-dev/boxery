@@ -141,7 +141,7 @@ The image contract maps onto most VM platforms:
 | Firecracker / Cloud Hypervisor | reflink-copy the rootfs (`cp --reflink`) | boot from a reflink copy | swap the rootfs file |
 | ZFS / btrfs-backed anything | `zfs snapshot` + `zfs clone` | `zfs clone` | `zfs rollback` or re-clone |
 
-Run `bash test/shell/host-images.sh` against the fake backend to see the behaviour every backend has to match.
+Run `bash test/shell/logic/host-images.sh` against the fake backend to see the behaviour every backend has to match.
 
 ### What stable means for a backend
 
@@ -150,7 +150,7 @@ A backend is **stable** when every line below holds. This is the bar libvirt and
 | # | | Requirement |
 |---|---|---|
 | 1 | Contract | Every function in the [VM](#vms), [image](#images-one-primitive-for-snapshots-forks-and-pool-resets) and [crash recovery](#crash-recovery-contract) tables, following their rules (images disk-only and independent, inventory errors never an empty host, only its own namespace touched). Each capability it doesn't offer is declared unsupported in [`backends/index.mjs`](../../backends/index.mjs) |
-| 2 | Offline tests | `test/shell/host-NAME-backend.sh`, against command doubles (no hypervisor, no account), run by `npm run test:shell`: every lifecycle function, capture of a running VM, a failed create or capture leaving nothing behind, every recovery hook run twice, inventory failing when the platform is unreachable, a create killed mid-way recovered by `reconcile`, and the host's or account's other VMs untouched |
+| 2 | Offline tests | `test/shell/{common,linux}/host-NAME-backend.sh`, against command doubles (no hypervisor, no account), run by `npm run test:shell`: every lifecycle function, capture of a running VM, a failed create or capture leaving nothing behind, every recovery hook run twice, inventory failing when the platform is unreachable, a create killed mid-way recovered by `reconcile`, and the host's or account's other VMs untouched |
 | 3 | Declaration | `stability`, `supported`, `requirements` and `capabilities` in `backends/index.mjs`, and a `tested` entry for every host configuration that passed lines 4–7 |
 | 4 | Live: e2e | `e2e.sh` passes from a controller on current code, on every host OS the docs say the backend runs on. For a backend with host-side tunnels, that means both supervisors: systemd user units with linger (Linux) and launchd (macOS) |
 | 5 | Live: lifecycle | What `e2e.sh` doesn't cover: `build-base`, `new --headless`, `new --from`, `stop`/`start`, pool lease and reset, and every account or plan option the docs offer (or that option is listed as unverified) |
@@ -282,7 +282,7 @@ Scorecard against [what stable means](#what-stable-means-for-a-backend) (2026-11
 | # | | exe | Evidence and what's left |
 |---|---|---|---|
 | 1 | Contract | pass | Every VM, image and recovery function. No `backend_host_key`: the endpoint is the tunnel's loopback end, trusted like Lima's |
-| 2 | Offline tests | pass | `test/shell/host-exe-backend.sh` (125 checks on master, 187 with #167–#171) covers every item on the list |
+| 2 | Offline tests | pass | `test/shell/common/host-exe-backend.sh` (125 checks on master, 187 with #167–#171) covers every item on the list |
 | 3 | Declaration | pass | `tested`: macOS arm64 and Linux arm64 (2026-11-04). No x64 host was tried |
 | 4 | Live: e2e | pass | Both host OSes, on current code (table above). The gaps came from the test hosts, not exe: no ollama on either, no LLM provider on the Linux host (those checks were done by hand there) |
 | 5 | Live: lifecycle | pass | Every item on both hosts, and `BOXERY_EXE_EGRESS`. `BOXERY_EXE_POOL` (Work plans only) stays listed as unverified |
@@ -295,7 +295,7 @@ Scorecard against [what stable means](#what-stable-means-for-a-backend) (2026-11
 
 ## boat (experimental)
 
-Runs VMs as [boat.dev](https://boat.dev) sandboxes: full Ubuntu 24.04 VMs (own kernel, systemd, Docker, `/dev/kvm`) driven through boat's REST API: `lib/boat.mjs` (Node, running `curl`) makes every request; `boat.sh` keeps the backend contract, ssh and the tunnels. Like `exe`, the host can be any machine with ssh, a Mac included. Offline tests: `test/shell/host-boat-backend.sh` (a fake API). Verified on a real free-trial account (November 2026, macOS host): `init`, the base build (on boat's image, next to its own desktop on `:0`), identity, the launchd tunnel with ssh as `agent` through it (and refused on the public endpoint), the desktop on `:1` and screenshots, the LLM proxy through the `-R` end, `stop`/`start`, and `resize` onto a new machine (re-pinned, hostname restored). Everything that needs a saved snapshot is not, because the trial can't make one: saving the base, `new`, `snap`/`revert`, `fork`, `new --from`, pool resets.
+Runs VMs as [boat.dev](https://boat.dev) sandboxes: full Ubuntu 24.04 VMs (own kernel, systemd, Docker, `/dev/kvm`) driven through boat's REST API: `lib/boat.mjs` (Node, running `curl`) makes every request; `boat.sh` keeps the backend contract, ssh and the tunnels. Like `exe`, the host can be any machine with ssh, a Mac included. Offline tests: `test/shell/common/host-boat-backend.sh` (a fake API). Verified on a real free-trial account (November 2026, macOS host): `init`, the base build (on boat's image, next to its own desktop on `:0`), identity, the launchd tunnel with ssh as `agent` through it (and refused on the public endpoint), the desktop on `:1` and screenshots, the LLM proxy through the `-R` end, `stop`/`start`, and `resize` onto a new machine (re-pinned, hostname restored). Everything that needs a saved snapshot is not, because the trial can't make one: saving the base, `new`, `snap`/`revert`, `fork`, `new --from`, pool resets.
 
 ```bash
 BOAT_API_KEY=boat_… ./host/boxery-host init --backend boat   # key saved in $BOXERY_BOAT_DIR/api-key (0600), never in host.env

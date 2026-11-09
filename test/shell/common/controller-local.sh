@@ -3,7 +3,7 @@
 # shellcheck disable=SC1090,SC2154  # sources the generated env.sh under test (vars come from it)
 # The "VM" is a local directory; an ssh stub executes remote scripts locally with HOME=that dir.
 set -eu
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 A=$ROOT/controller/boxery
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export BOXERY_CONF=$tmp/hostconf BOXERY_HOME=$tmp/ctl BOXERY_BACKEND=fake BOXERY_FAKE_DIR=$tmp/vms BOXERY_CACHE=$tmp/cache

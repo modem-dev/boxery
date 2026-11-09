@@ -5,7 +5,7 @@
 # faked (fake-provision), but it writes build-info with the lib.sh boxery pushed, so the host's layers hash
 # is checked against the guest's.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 H=$ROOT/host/boxery-host
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export BOXERY_CONF=$tmp/conf BOXERY_CACHE=$tmp/cache BOXERY_BACKEND=fake BOXERY_FAKE_DIR=$tmp/vms BOXERY_PROXY_PORT=9999 BOXERY_BOOT_ID=boot-1 BOXERY_SSH_WAIT_TRIES=3

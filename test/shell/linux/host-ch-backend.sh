@@ -2,7 +2,7 @@
 # cloud-hypervisor backend tests: boxery-host + host/backends/cloud-hypervisor.sh with stubbed
 # cloud-hypervisor, ch-remote, qemu-img, cloud-localds, ip, nft, sysctl and systemctl (no VMs, no root).
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 H=$ROOT/host/boxery-host
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export BOXERY_CONF=$tmp/conf BOXERY_BACKEND=cloud-hypervisor BOXERY_CH_DIR=$tmp/ch BOXERY_CH_SUDO="" BOXERY_PROXY_PORT=9999

@@ -4,7 +4,7 @@
 # backend runs in VMs through the edge (`ssh NAME.exe.xyz`), and accepts the boxery-host → guest sshd
 # hops (agent@127.0.0.1 through the tunnel). systemctl and nc are stubbed as in host-ch-backend.sh.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 H=$ROOT/host/boxery-host
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export BOXERY_CONF=$tmp/conf BOXERY_CACHE=$tmp/cache BOXERY_BACKEND=exe BOXERY_EXE_DIR=$tmp/exe BOXERY_EXE_PREFIX=bxtest- BOXERY_EXE_SUPERVISOR=systemd

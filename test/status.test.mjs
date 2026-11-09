@@ -1,5 +1,5 @@
 // Terminal status (OSC 7501): controller/status.mjs. Which commands report is pinned by test/parity.test.mjs; the
-// real CLI on a pty (auto-detection, Ctrl-C, TERM=dumb) is in test/shell/controller-local.sh.
+// real CLI on a pty (auto-detection, Ctrl-C, TERM=dumb) is in test/shell/common/controller-local.sh.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { test } from "node:test";

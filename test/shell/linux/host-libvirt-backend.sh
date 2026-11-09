@@ -2,7 +2,7 @@
 # libvirt backend: root volumes (desktop base vs stock image for headless VMs), against command doubles
 # only (virsh, virt-install, cloud-localds are shell functions here). Never touches real libvirt.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT; T=$tmp   # T: backend functions have their own local tmp
 export BOXERY_POOL=test BOXERY_POOL_DIR=$tmp/pool BOXERY_DOMAIN_PREFIX=boxery- CACHE=$tmp/cache
 mkdir -p "$tmp/vols" "$CACHE"

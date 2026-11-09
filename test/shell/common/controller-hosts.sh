@@ -2,7 +2,7 @@
 # shellcheck disable=SC2088 # tilde strings below intentionally refer to target home
 # Offline multi-profile registry and shell-layer quoting regressions (stock Bash 3.2).
 set -eu
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CLI=$ROOT/controller/boxery
 REAL_SSH=$(command -v ssh)
 tmp=$(mktemp -d)

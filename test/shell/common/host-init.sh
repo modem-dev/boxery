@@ -2,7 +2,7 @@
 # boxery-host init, add-key and build-base against the fake backend: state directory and permissions,
 # host.env, the proxy/reaper service files, and the service manager calls (systemctl/launchctl stubbed).
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 H=$ROOT/host/boxery-host
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export HOME=$tmp/home BOXERY_CONF=$tmp/conf BOXERY_BACKEND=fake BOXERY_FAKE_DIR=$tmp/vms BOXERY_PROXY_PORT=9999 CALLS=$tmp/calls

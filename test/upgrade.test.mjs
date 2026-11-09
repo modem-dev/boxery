@@ -1,5 +1,5 @@
 // boxery-host upgrade: service-file parsing, profile discovery, version comparison, and the host-wide
-// operation lock. The end-to-end flow (git origin, init, rollback) is test/shell/host-upgrade.sh.
+// operation lock. The end-to-end flow (git origin, init, rollback) is test/shell/linux/host-upgrade.sh.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

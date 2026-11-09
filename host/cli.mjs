@@ -1,5 +1,5 @@
 // boxery-host commands (loaded by host/boxery-host.mjs). Output formats are a contract: docs/cli.md, and
-// test/shell/host-output.sh pins them. Errors: "boxery-host: …" on stderr, non-zero exit, nothing on stdout.
+// test/shell/logic/host-output.sh pins them. Errors: "boxery-host: …" on stderr, non-zero exit, nothing on stdout.
 //
 // Mutating commands run supervised (boxery-operations.mjs): this process takes the VMs' lifecycle locks,
 // then starts `boxery-host.mjs __worker __dispatch COMMAND …` in its own process group to do the work.
