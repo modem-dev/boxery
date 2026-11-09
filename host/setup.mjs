@@ -10,7 +10,7 @@ import { checkBackend } from "./capabilities.mjs";
 import { defaultConf, HOST_ENV } from "./config.mjs";
 import { ensureHostKey, hasHostKey } from "./hostkeys.mjs";
 import { baseUserdata } from "./seed.mjs";
-import { fail, jsonArray, log, print, readFd, sleep, table } from "./util.mjs";
+import { fail, hint, jsonArray, log, print, readFd, sleep, table } from "./util.mjs";
 import { hostUsage } from "./help.mjs";
 /** @import { Config } from "./config.mjs" */
 /** @import { Runtime } from "./runtime.mjs" */
@@ -324,7 +324,7 @@ async function pinExisting(rt) {
 			if (await ensureHostKey(rt, vm.name, await rt.vms.sshEndpoint(vm.name, { quiet: true }))) left.push(vm.name);
 		} catch { left.push(vm.name); }
 	}
-	if (left.length) log(`${left.length} VM(s) have no pinned ssh host key yet (${left.join(", ")}): boxery start pins a stopped one; for a running one run boxery pin NAME`);
+	if (left.length) log(`${left.length} VM(s) have no pinned ssh host key yet (${left.join(", ")}): ${hint("start NAME")} pins a stopped one; for a running one run ${hint("pin NAME")}`);
 }
 
 // ---------------------------------------------------------------- commands

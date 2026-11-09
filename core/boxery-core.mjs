@@ -417,8 +417,19 @@ export async function sshOk(vm, script, opts = {}) {
 
 // ---------------------------------------------------------------- why a VM can't be reached
 
+/** A boxery command for a hint about the current host's VMs: `boxery --host NAME COMMAND` when the person named a
+ *  host (BOXERY_CLI: controller/lib.mjs invokedAs) or this isn't the default host (another host's VM in cp, an
+ *  agent's host session), else `boxery COMMAND`, as host/util.mjs hint does for the host's own messages.
+ *  @param {string} command e.g. "ls" */
+export function cliHint(command) {
+	const name = currentHost().name;
+	let def = null;
+	try { def = defaultHost(); } catch { /* a malformed default-host file must not replace the message */ }
+	return `boxery${/^boxery --host /.test(process.env.BOXERY_CLI ?? "") || name !== def ? ` --host ${name}` : ""} ${command}`;
+}
+
 /** What the host says of a VM it doesn't have, and where to look. @param {string} vm */
-export const noSuchVm = (vm) => `no such vm: ${vm} on host ${currentHost().name} (boxery ls lists them)`;
+export const noSuchVm = (vm) => `no such vm: ${vm} on host ${currentHost().name} (${cliHint("ls")} lists them)`;
 
 /** A VM's problem, for a person or an agent. known: the host's records explain it (no such VM, not running, a
  *  pool VM without a lease); otherwise message is what ssh said. missing: the host has no such VM, so whatever
@@ -457,11 +468,11 @@ export async function vmProblem(vm, { env, signal } = {}) {
 	const v = vms.find((r) => r.name === vm);
 	if (!v) return { message: noSuchVm(vm), known: true, missing: true };
 	if (v.state && !["running", "idle"].includes(v.state))
-		return { message: /ing$/.test(v.state) ? `VM ${vm} is ${v.state}; try again when it's running (boxery ls shows its state)` : `VM ${vm} is ${v.state}; start it: boxery start ${vm}`, known: true };
+		return { message: /ing$/.test(v.state) ? `VM ${vm} is ${v.state}; try again when it's running (${cliHint("ls")} shows its state)` : `VM ${vm} is ${v.state}; start it: ${cliHint(`start ${vm}`)}`, known: true };
 	if (v.lease) {
 		const mine = findLease(vm);
-		if (!mine) return { message: `VM ${vm} is in the host's shared pool: only the holder of a lease on it can reach it, and this machine holds none (boxery acquire leases a pool VM; boxery leases lists yours)`, known: true };
-		if (mine.expires * 1000 < Date.now()) return { message: `your lease on VM ${vm} has expired, so it no longer lets you in (boxery leases lists yours; boxery acquire leases a pool VM again)`, known: true };
+		if (!mine) return { message: `VM ${vm} is in the host's shared pool: only the holder of a lease on it can reach it, and this machine holds none (${cliHint("acquire")} leases a pool VM; ${cliHint("leases")} lists yours)`, known: true };
+		if (mine.expires * 1000 < Date.now()) return { message: `your lease on VM ${vm} has expired, so it no longer lets you in (${cliHint("leases")} lists yours; ${cliHint("acquire")} leases a pool VM again)`, known: true };
 	}
 	return { message: `VM "${vm}" unreachable over ssh: ${said || (probe.code == null ? "timed out" : "connection failed")}`, known: false };
 }
@@ -1181,7 +1192,7 @@ export function formatVms(vms) {
 	const outdated = vms.filter((v) => v.guest?.status === "outdated");
 	if (!outdated.length) return table;
 	// Patching restarts VMs and is the user's call: agents only point it out.
-	return `${table}\noutdated guest software: ${outdated.map((v) => `${v.name} (${(v.guest?.reasons ?? []).join(", ")})`).join("; ")}. Tell the user; they can update it with: boxery patch NAME`;
+	return `${table}\noutdated guest software: ${outdated.map((v) => `${v.name} (${(v.guest?.reasons ?? []).join(", ")})`).join("; ")}. Tell the user; they can update it with: ${cliHint("patch NAME")}`;
 }
 
 /** VM's grants (listGrants: this machine's records). With none recorded, the host is asked whether VM exists, so

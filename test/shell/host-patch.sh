@@ -134,17 +134,17 @@ echo "== snapshots and images"
 grep -q "d1's snapshots were not patched (old): a VM made or reverted from one has its old software until you patch it" "$tmp/err" && ok "patch says the snapshots weren't patched" || bad "no snapshot note: $(cat "$tmp/err")"
 "$H" snaps d1 | grep -q $'^old\t.*outdated$' && ok "...and they stay outdated" || bad "snaps: $("$H" snaps d1)"
 "$H" new d2 --from d1@old >/dev/null 2>"$tmp/err"; [[ $(status d2) == "outdated layers changed" ]] && ok "a VM from an outdated image is outdated" || bad "d2: $(status d2)"
-grep -qx "==> warning: d2 is an outdated guest (layers changed), as d1@old is; update it with: boxery patch d2" "$tmp/err" && ok "...and new says so (#215)" || bad "new warning: $(cat "$tmp/err")"
+grep -qx "==> warning: d2 is an outdated guest (layers changed), as d1@old is; update it with: boxery-host patch d2" "$tmp/err" && ok "...and new says so (#215)" || bad "new warning: $(cat "$tmp/err")"
 "$H" revert d1 old >/dev/null 2>&1; [[ $(status d1) == "outdated layers changed" ]] && ok "so is a VM reverted to one" || bad "reverted d1: $(status d1)"
 "$H" fork d1 f1 f2 >/dev/null 2>"$tmp/err"
-[[ $(grep -c 'outdated guest' "$tmp/err") == 1 ]] && grep -qx "==> warning: d1 is an outdated guest (layers changed), and so are its forks; update them with: boxery patch NAME (patch d1 first to fork current copies)" "$tmp/err" &&
+[[ $(grep -c 'outdated guest' "$tmp/err") == 1 ]] && grep -qx "==> warning: d1 is an outdated guest (layers changed), and so are its forks; update them with: boxery-host patch NAME (patch d1 first to fork current copies)" "$tmp/err" &&
 	ok "fork of an outdated VM: one warning, naming the source" || bad "fork warning: $(cat "$tmp/err")"
 "$H" rm f1 >/dev/null 2>&1; "$H" rm f2 >/dev/null 2>&1
 # A desktop base built with other layers than the host's: every new desktop VM has its build-info.
 sed 's/^layers_hash=.*/layers_hash=0000/' "$(r h1)/etc/boxery/build-info" >"$tmp/first-boot-build-info"
-"$H" new d3 >/dev/null 2>"$tmp/err"
-grep -qx "==> warning: d3 is an outdated guest (layers changed), as the desktop base is; update it with: boxery patch d3; to make new desktop VMs current, rebuild the base (boxery build-base) once no VM depends on it" "$tmp/err" &&
-	ok "new from an outdated desktop base: says so, with a fix that works now (#215)" || bad "base warning: $(cat "$tmp/err")"
+BOXERY_CLI="boxery --host lab" "$H" new d3 >/dev/null 2>"$tmp/err"
+grep -qx "==> warning: d3 is an outdated guest (layers changed), as the desktop base is; update it with: boxery --host lab patch d3; to make new desktop VMs current, rebuild the base (boxery --host lab build-base) once no VM depends on it" "$tmp/err" &&
+	ok "new from an outdated desktop base: says so, with a fix that works now (#215), as the person typed it" || bad "base warning: $(cat "$tmp/err")"
 cp "$(r h1)/etc/boxery/build-info" "$tmp/first-boot-build-info"
 "$H" new d4 >/dev/null 2>"$tmp/err"; rm "$tmp/first-boot-build-info"
 ! grep -q warning "$tmp/err" && [[ $(status d4) == "current " ]] && ok "...a current one: no warning" || bad "d4: $(status d4) $(cat "$tmp/err")"

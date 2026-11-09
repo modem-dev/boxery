@@ -323,6 +323,13 @@ test("an unreachable VM says why (#210): no such VM, stopped, a pool VM this mac
 		assert.match(text(r), none);
 	}
 	assert.equal(existsSync(path.join(dir, "ghost-copy")), false);
+	// On a host that isn't the default, hints name it: a bare `boxery ls` would ask the default host.
+	const other = client(["--host", "beta"]);
+	assert.match(text(await other.tool("vm_bash", { vm: "ghost", command: "true" })), /^no such vm: ghost on host beta \(boxery --host beta ls lists them\)$/);
+	// A malformed default-host file doesn't replace the message.
+	writeFileSync(path.join(dir, "home", "default-host"), "not a host\n\n");
+	try { assert.match(text(await other.tool("vm_bash", { vm: "ghost", command: "true" })), /^no such vm: ghost on host beta \(boxery --host beta ls lists them\)$/); }
+	finally { writeFileSync(path.join(dir, "home", "default-host"), "alpha\n"); }
 	// A command's own 255 is its exit code: a fresh connection works, so the VM isn't unreachable.
 	assert.match(text(await c.tool("vm_bash", { vm: "fakevm", command: "exit 255" })), /\[exit 255\]$/);
 });

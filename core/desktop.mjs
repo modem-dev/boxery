@@ -6,7 +6,7 @@
 // previous session's for new logins; connections already open stay.
 import { spawn } from "node:child_process";
 import net from "node:net";
-import { assertName, currentHost, sshRun } from "./boxery-core.mjs";
+import { assertName, cliHint, currentHost, sshRun } from "./boxery-core.mjs";
 import { profileConfig } from "./profile.mjs";
 
 const SETUP = 'if test -e /etc/boxery/headless; then echo headless\nelif command -v boxery-vnc-password >/dev/null; then p=$(boxery-vnc-password --new) && echo "password $p"\nelse echo nopassword; fi';
@@ -32,8 +32,8 @@ export async function prepareDesktop(name, { terminal = false } = {}) {
 	let pw = "", warning = null;
 	if (out === "headless") throw new Error(`${name} is headless (boxery new --headless): it has no desktop`);
 	else if (out.startsWith("password ")) { pw = out.slice(9); if (!/^[A-Za-z0-9]+$/.test(pw)) throw new Error(`unexpected VNC password from ${name}`); }
-	else if (out === "nopassword") warning = `${name}'s desktop has no VNC password: its image predates it, so while this tunnel is open any process on this machine (or a web page) can use it. Rebuild the desktop base (boxery build-base) and create the VM again.`;
-	else throw new Error(`couldn't set up the desktop of ${name} (is it running? boxery ls)${why ? `: ${why}` : ""}`);
+	else if (out === "nopassword") warning = `${name}'s desktop has no VNC password: its image predates it, so while this tunnel is open any process on this machine (or a web page) can use it. Rebuild the desktop base (${cliHint("build-base")}) and create the VM again.`;
+	else throw new Error(`couldn't set up the desktop of ${name} (is it running? ${cliHint("ls")})${why ? `: ${why}` : ""}`);
 	const port = await freePort(16080);
 	return { url: `http://127.0.0.1:${port}/vnc.html?autoconnect=1&resize=remote&reconnect=1${pw ? `#password=${pw}` : ""}`, port, warning };
 }
@@ -72,7 +72,7 @@ export async function openDesktop(name, { open = true } = {}) {
 		if (!(await freePortAt(port))) { await new Promise((r) => setTimeout(r, 200)); up = alive(); }
 		else await new Promise((r) => setTimeout(r, 100));
 	}
-	if (!up) { child.kill(); throw new Error(`the tunnel to ${name}'s desktop didn't come up (is it running? boxery ls)`); }
+	if (!up) { child.kill(); throw new Error(`the tunnel to ${name}'s desktop didn't come up (is it running? ${cliHint("ls")})`); }
 	const opened = open ? await openUrl(url) : false;
 	return { url, warning, opened, close: () => { child.kill(); }, ended };
 }

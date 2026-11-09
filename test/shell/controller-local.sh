@@ -161,6 +161,9 @@ for c in "run nosuch true" "ssh nosuch true" "jobs nosuch" "sessions nosuch" "lo
 	rc=0; out=$(eval "\"\$A\" $c" 2>&1 </dev/null) || rc=$?
 	[[ $rc == 255 && $out == *"boxery: no such vm: nosuch on host local (boxery ls lists them)"* ]] && ok "$c: no such vm, exit 255" || bad "$c: rc=$rc $out"
 done
+# Named with --host, the hint names it too (#217), here from core (shared with the agent tools).
+rc=0; out=$("$A" --host local run nosuch true 2>&1 </dev/null) || rc=$?
+[[ $rc == 255 && $out == *"boxery: no such vm: nosuch on host local (boxery --host local ls lists them)"* ]] && ok "--host local run nosuch: the hint names --host" || bad "--host run nosuch: rc=$rc $out"
 rc=0; out=$("$A" run w1 bash -c 'exit 255' 2>&1) || rc=$?
 [[ $rc == 255 && $out != *boxery:* ]] && ok "run: the command's own exit 255 says nothing more" || bad "run exit 255: rc=$rc $out"
 # desktop, cp and grants say so too (#216); cp leaves nothing to clean up, since nothing could be staged.

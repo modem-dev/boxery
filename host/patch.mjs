@@ -69,7 +69,7 @@ export async function patchVm(rt, args) {
 	/** @type {GuestEndpoint} */
 	let ep;
 	try { ep = await rt.vms.sshEndpoint(name, { quiet: true }); } catch { return fail(`${name} is not running (start it first)`); }
-	const t0 = Date.now(), secs = () => Math.floor((Date.now() - t0) / 1000);
+	const t0 = performance.now(), secs = () => Math.floor((performance.now() - t0) / 1000); // monotonic: a wall clock can step back
 	// A crash from here on leaves a pool VM between clean images: recovery puts it back to one (recovery.mjs).
 	const action = row ? rt.intent("pool-patch", name) : "";
 	if (await rt.guest.run(ep, "sudo bash -s", { input: await pushScript(rt) }) !== 0) fail(`could not install this host's image layers in ${name}`);

@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
-import { currentHost, VALID_NAME } from "./boxery-core.mjs";
+import { cliHint, currentHost, VALID_NAME } from "./boxery-core.mjs";
 import { reapplyPushed } from "./grant-operations.mjs";
 import { writeAtomic } from "./fsutil.mjs";
 import { closeMaster, hostLeaseJson, hostRun, writeSshConfig } from "./profile.mjs";
@@ -66,7 +66,7 @@ export function findLease(ref) {
 /** @param {string} ref */
 function needLease(ref) {
 	const r = typeof ref === "string" && ref ? findLease(ref) : null;
-	if (!r) throw new Error(`no local lease for '${ref ?? ""}' (boxery leases)`);
+	if (!r) throw new Error(`no local lease for '${ref ?? ""}' (${cliHint("leases")})`);
 	return r;
 }
 

@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JOBS_NODE, VALID_JOB } from "../core/boxery-core.mjs";
 import { closeMaster } from "../core/profile.mjs";
-import { CliError, die, duration, needVm, note, num, quit, say, usage, vmSsh, vmSshCapture, WAIT_LOST, WAIT_TIMEOUT, warn } from "./lib.mjs";
+import { BOXERY, CliError, USAGE, die, duration, needVm, note, num, quit, say, usage, vmSsh, vmSshCapture, WAIT_LOST, WAIT_TIMEOUT, warn } from "./lib.mjs";
 /** @import { Selected } from "./lib.mjs" */
 
 
@@ -34,7 +34,7 @@ const jobsVmCapture = (s, name, args, o) => vmSshCapture(s, helper(name, args), 
 const exit = (rc) => { if (rc) throw new CliError("", rc); };
 
 /** @param {string | undefined} id */
-const needJob = (id) => (VALID_JOB.test(id ?? "") ? /** @type {string} */ (id) : die(`invalid job id: ${id ?? ""} (see: boxery jobs NAME)`));
+const needJob = (id) => (VALID_JOB.test(id ?? "") ? /** @type {string} */ (id) : id ? die(`invalid job id: ${id} (see: ${BOXERY} jobs NAME)`) : die(`missing job id (see: ${BOXERY} jobs NAME)`, USAGE));
 
 /** run --bg: start ARGV (each word's bytes) in the VM as a job, in CWD (bytes, or null: ~/project); its id.
  *  @param {Selected} s @param {string} name @param {Buffer[]} argv @param {Buffer | null} cwd */
@@ -108,7 +108,7 @@ export async function waitJob(s, [vm, job, ...rest]) {
 			// waiting doesn't affect the job (tmux in the VM): reconnect and keep waiting, within --timeout.
 			if (!reached) die(`cannot reach ${name}`);
 			if (deadline != null && Date.now() / 1000 >= deadline) { warn(`cannot reach ${name}; --timeout passed (the job may still be running)`); quit(WAIT_TIMEOUT); }
-			if (++drops > 60) die(`cannot reach ${name}; giving up (the job may still be running: boxery jobs ${name})`);
+			if (++drops > 60) die(`cannot reach ${name}; giving up (the job may still be running: ${BOXERY} jobs ${name})`);
 			warn(`lost the connection to ${name}; reconnecting (the job keeps running)`);
 			await closeMaster(name);
 			await new Promise((res) => setTimeout(res, 5000));

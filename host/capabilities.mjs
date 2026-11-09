@@ -3,7 +3,7 @@
 import { accessSync, constants } from "node:fs";
 import path from "node:path";
 import { BACKENDS, backendMetadata, capabilityStatus, declared, matchesPlatform, platformStatus } from "../backends/index.mjs";
-import { fail, log, print } from "./util.mjs";
+import { fail, hint, log, print } from "./util.mjs";
 import { hostUsage } from "./help.mjs";
 /** @import { Configuration, Requirement } from "../backends/index.mjs" */
 /** @import { Runtime } from "./runtime.mjs" */
@@ -88,5 +88,5 @@ export function checkOperation(backend, command, args) {
 		?? (command === "pool" && args[0] === "add" ? "pools" : null);
 	if (!feature) return;
 	const c = metadata.capabilities[feature];
-	if (c.status === "unsupported") fail(`${backend}: ${feature} is unavailable. ${c.note}. Discover alternatives with boxery backends --json.`);
+	if (c.status === "unsupported") fail(`${backend}: ${feature} is unavailable. ${c.note}. Discover alternatives with ${hint("backends --json")}.`);
 }

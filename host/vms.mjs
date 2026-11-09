@@ -136,7 +136,7 @@ export async function createVm(rt, { name, shape, cpus, mem, disk, from, headles
 	} else if (!await rt.vms.hasBase()) {
 		fail(`no base image; run: ${hint("build-base")} (or: new ${name} --headless, which needs none)`);
 	}
-	const t0 = Date.now(), secs = () => Math.floor((Date.now() - t0) / 1000);
+	const t0 = performance.now(), secs = () => Math.floor((performance.now() - t0) / 1000); // monotonic: a wall clock can step back
 	// Opt-in diagnostics stay on stderr and never include seed contents, tokens or SSH commands.
 	/** @template T @param {string} stage @param {() => Promise<T>} fn @returns {Promise<T>} */
 	const step = async (stage, fn) => {
@@ -195,8 +195,8 @@ export async function createVm(rt, { name, shape, cpus, mem, disk, from, headles
 function warnOutdated(rt, name, rec, source) {
 	const { status, reasons } = guestChecker(rt)(rec, { image: true }); // what it was built with; a reboot is the guest's own
 	if (status !== "outdated" || !source) return;
-	const fix = source === "the desktop base" ? "; to make new desktop VMs current, rebuild the base (boxery build-base) once no VM depends on it" : "";
-	log(`warning: ${name} is an outdated guest (${reasons.join(", ")}), as ${source} is; update it with: boxery patch ${name}${fix}`);
+	const fix = source === "the desktop base" ? `; to make new desktop VMs current, rebuild the base (${hint("build-base")}) once no VM depends on it` : "";
+	log(`warning: ${name} is an outdated guest (${reasons.join(", ")}), as ${source} is; update it with: ${hint(`patch ${name}`)}${fix}`);
 }
 
 /** @param {Runtime} rt @param {string[]} args */
@@ -247,7 +247,7 @@ export async function fork(rt, args) {
 	}
 	const image = `${src}@fork-${stamp()}-${randomBytes(3).toString("hex")}`;
 	const cleanup = rt.intent("fork-image", image);
-	const t0 = Date.now(), secs = () => Math.floor((Date.now() - t0) / 1000);
+	const t0 = performance.now(), secs = () => Math.floor((performance.now() - t0) / 1000);
 	await captureVm(rt, src, image);
 	log(`captured ${src} in ${secs()}s; booting ${dsts.length} fork(s)`);
 	// Boot the forks in parallel under this operation's locks; print results in argument order. A failed
@@ -266,7 +266,7 @@ export async function fork(rt, args) {
 	await rt.vms.call("backend_image_rm", [image]);
 	// Once for all the forks, naming SRC: patching it first gives current forks (#215).
 	const { status, reasons } = guestChecker(rt)(buildRecord(rt.conf, image), { image: true });
-	if (status === "outdated" && results.some((r) => r.status === "fulfilled")) log(`warning: ${src} is an outdated guest (${reasons.join(", ")}), and so are its forks; update them with: boxery patch NAME (patch ${src} first to fork current copies)`);
+	if (status === "outdated" && results.some((r) => r.status === "fulfilled")) log(`warning: ${src} is an outdated guest (${reasons.join(", ")}), and so are its forks; update them with: ${hint("patch NAME")} (patch ${src} first to fork current copies)`);
 	deleteBuildRecord(rt.conf, image);
 	rt.done(cleanup);
 	log(`forked ${src} → ${dsts.join(" ")} in ${secs()}s`);
@@ -335,13 +335,13 @@ export async function stop(rt, [name]) {
 	const was = stoppedAs(rt, vm?.state ?? "");
 	if (was && (!vm?.tunnel || vm.tunnel === "down")) { log(`${name} is already ${was}`); return; }
 	await rt.vms.call("backend_stop", [name]);
-	const wait = Number(rt.env?.BOXERY_STOP_WAIT) > 0 ? Number(rt.env?.BOXERY_STOP_WAIT) : 120, t0 = Date.now();
+	const wait = Number(rt.env?.BOXERY_STOP_WAIT) > 0 ? Number(rt.env?.BOXERY_STOP_WAIT) : 120, t0 = performance.now();
 	for (let announced = false; ;) {
 		const now = await inventoryEntry(rt, name);
 		if (!now) { log(`${name} shutting down`); return; } // can't tell: as before
 		const as = stoppedAs(rt, now.state);
 		if (as) { log(`${name} ${as}`); return; }
-		if (Date.now() - t0 >= wait * 1000) fail(`${name} is still ${now.state || "running"} ${wait}s after it was asked to shut down; run stop again, or look at the guest's console`);
+		if (performance.now() - t0 >= wait * 1000) fail(`${name} is still ${now.state || "running"} ${wait}s after it was asked to shut down; run stop again, or look at the guest's console`);
 		if (!announced) { log(`${name} shutting down`); announced = true; }
 		await sleep(1000);
 	}
