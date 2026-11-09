@@ -254,6 +254,25 @@ boxery host upgrade [--check] [--ref REF]    # update boxery on the host (see In
 
 These `host` actions act on the selected host (`--host NAME`, else the default); `proxy-log`, `backend` and `upgrade-host` are the older spellings. `shapes` and `pin` stay top level.
 
+### Terminal status
+
+Long commands tell the terminal what they're doing, with the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501). A terminal that speaks it, such as Rex, shows a spinner while the command runs and marks it done or failed, so you can start `boxery build-base` and look at another tab. Terminals that don't know the sequence ignore it.
+
+| Reports | When |
+|---|---|
+| `run`, `wait`, `new`, `fork`, `start`, `stop`, `resize`, `patch`, `snap`, `revert`, `build-base`, `cp`, `upgrade-host` | always (`run --bg` and `upgrade-host --check` return at once, so they don't) |
+| `logs` | with `-f` |
+| `acquire` | with `--wait` |
+| `runners once` | always (the other `runners` actions are host calls) |
+
+A family action (`job wait`, `lease acquire`, `snapshot create`, …) reports through the command it runs. Quick commands (`ls`, `jobs`, `grants`, …) don't report, and neither do `ssh`, `attach`, `forward` and `desktop`, which are interactive or a tunnel with nothing to finish.
+
+- **Outcome:** `working` while it runs, then `done` (exit 0), `error` (anything else, with the exit code), or `idle` when you stop it with Ctrl-C. `wait` also reports `idle` when `--timeout` passes (exit 124) and `error` for a lost job (125). The message is only the VM name, the command and the outcome (`demo: run failed (exit 2)`), never the command's output.
+- **Only on a terminal:** it's written to stderr, and only when stderr is a terminal and `TERM` isn't `dumb`. Pipes, logs and CI never see it, and neither does stdout. Agents using the `vm_*` tools capture output, so they get none of it.
+- **`BOXERY_STATUS=0`** turns it off. `BOXERY_STATUS=1` forces it on even when stderr isn't a terminal (used by the tests).
+- Inside `boxery attach` it doesn't reach your terminal: tmux drops sequences it doesn't know.
+- A command declares it with a `status` on its entry in `controller/cli.mjs`'s `COMMANDS` (`controller/status.mjs`); `test/parity.test.mjs` fails for a command that neither declares one nor says why not.
+
 ### All commands
 
 Generated from the help `boxery help --all` shows (`controller/cli.mjs`); edit it there, then `npm run docs:cli`. `--host NAME` before any command runs it on another host. The last table lists the older spellings, each with the family action it is the same as.

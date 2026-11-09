@@ -13,8 +13,10 @@ import { literal, literalArgs, remotePath } from "../core/ssh-config.mjs";
 import { controllerVersion, hostVersion, skewNote, upgradeHint } from "../core/versions.mjs";
 import { backendCommand, hostCommand, setupNamed } from "./hosts.mjs";
 import { BOXERY, CliError, USAGE, VALID_SNAP, VALID_VM, commandLine, die, invokedAs, usage, hasRawBytes, hostFailed, hostPass, inherit, needHost, needVm, note, rawTail, say, select, vmSsh, vmSshCapture, warn } from "./lib.mjs";
+import { reporting } from "./status.mjs";
 import { actionHelp, registerCommands, renderCommand, renderFamily, renderTop, resolve, routedThrough, unknownAction, unknownCommand } from "./usage.mjs";
 /** @import { Selected } from "./lib.mjs" */
+/** @import { StatusSpec } from "./status.mjs" */
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -285,7 +287,7 @@ async function cmdSsh(s, [name = "", ...rest]) {
  *  (help, setup, version without a host) are dispatched in main() and have no `run` here. A family has `actions`
  *  instead of `run`: each runs another command's handler, except host's registry actions (add, ls, show, use, rm),
  *  which main() runs before any host is selected.
- *  @typedef {{ help: Help, run?: Command, preHost?: true, actions?: Record<string, FamilyAction> } | { alias: string }} Entry */
+ *  @typedef {{ help: Help, run?: Command, status?: StatusSpec, preHost?: true, actions?: Record<string, FamilyAction> } | { alias: string }} Entry */
 
 const JSON_FLAG = /** @type {[string, string]} */ (["--json", "Print JSON (fields: docs/cli.md#json-output)"]);
 // Captures differ by backend (#219; backends/index.mjs, diskSnapshots).
@@ -337,6 +339,7 @@ export const COMMANDS = {
 	},
 	"build-base": {
 		help: { group: "legacy", summary: "build the host's desktop base image (one time, ~3 min)", usage: ["build-base"], details: ["Headless VMs (new --headless) don't need it."], docs: "cli.md#lifecycle" },
+		status: {},
 		run: async (s, args) => { needHost(s); if (args.length) usage("build-base"); await lc(() => lifecycle.buildBase(passthrough())); },
 	},
 
@@ -359,14 +362,17 @@ export const COMMANDS = {
 			examples: [["A desktop VM", "boxery new demo"], ["A larger, headless one", "boxery new ci-1 --headless --shape large"], ["A GitHub Actions runner VM", "boxery new runner-1 --headless --layers github-runner"]],
 			seeAlso: ["shapes", "fork", "rm"], docs: "cli.md#lifecycle",
 		},
+		status: { vm: true },
 		run: async (s, args) => { needHost(s); await cmdNew(s, args); },
 	},
 	start: {
 		help: { group: "vms", summary: "start a stopped VM (pins its ssh host key where it can)", usage: ["start NAME"], seeAlso: ["stop"] },
+		status: { vm: true },
 		run: async (s, [n]) => { needHost(s); await lc(() => lifecycle.startVm(needVm(n), passthrough())); },
 	},
 	stop: {
 		help: { group: "vms", summary: "stop a VM", usage: ["stop NAME"], seeAlso: ["start"] },
+		status: { vm: true },
 		run: async (s, [n]) => { needHost(s); await lc(() => lifecycle.stopVm(needVm(n), passthrough())); },
 	},
 	rm: {
@@ -380,6 +386,7 @@ export const COMMANDS = {
 			flags: SIZE_FLAGS.slice(1), examples: [["8 CPUs and 16 GiB of memory", "boxery resize demo --cpus 8 --mem 16384"]], docs: "cli.md#lifecycle",
 		},
 		// A resize restarts a running VM: the connection is stale afterwards and tmpfs grants are gone.
+		status: { vm: true },
 		run: async (s, [n, ...rest]) => {
 			needHost(s); needVm(n);
 			/** @type {Record<string, string>} */
@@ -399,6 +406,7 @@ export const COMMANDS = {
 			flags: [["--grants", "Give the forks SRC's grants too (asks for each)"], ...SIZE_FLAGS],
 			examples: [["Two copies to try two approaches", "boxery fork demo try-a try-b"]], seeAlso: ["snap", "new"], docs: "cli.md#snapshots-and-forks",
 		},
+		status: { vm: true },
 		run: async (s, args) => { needHost(s); await cmdFork(s, args); },
 	},
 	patch: {
@@ -408,6 +416,7 @@ export const COMMANDS = {
 			flags: [["--all", "Every running VM, in turn"], ["--wait S", "Wait up to S seconds for a pool VM's lease to end"]],
 			seeAlso: ["ls"], docs: "cli.md#lifecycle",
 		},
+		status: { vm: true },
 		run: async (s, args) => { needHost(s); await cmdPatch(s, args); },
 	},
 	pin: {
@@ -430,6 +439,7 @@ export const COMMANDS = {
 	// ------------------------------------------------ snapshots
 	snap: {
 		help: { group: "legacy", summary: "snapshot a VM's disk (Lima restarts a running VM)", usage: ["snap NAME [SNAP]"], details: [CAPTURE_NOTE], seeAlso: ["snaps", "revert", "snap-rm"], docs: "cli.md#snapshots-and-forks" },
+		status: { vm: true },
 		run: async (s, args) => {
 			needHost(s);
 			if (args[1] && !VALID_SNAP.test(args[1])) die(`invalid snapshot name: ${args[1]}`);
@@ -443,6 +453,7 @@ export const COMMANDS = {
 	revert: {
 		help: { group: "legacy", summary: "restore a VM to a snapshot (keeps its name, address and token)", usage: ["revert NAME SNAP"] },
 		// A revert restores the snapshot's tmpfs too: grants are always reconciled to the current ones.
+		status: { vm: true },
 		run: async (s, [n, snap]) => { needHost(s); if (!snap) usage("revert"); if (!VALID_SNAP.test(snap)) die(`invalid snapshot name: ${snap ?? ""}`); await lc(() => lifecycle.revertVm(needVm(n), snap, passthrough())); },
 	},
 	"snap-rm": {
@@ -486,6 +497,7 @@ export const COMMANDS = {
 			examples: [["Args are passed as-is: quotes, $, *, ; stay literal", "boxery run demo pnpm test"], ["In ~/project/modem", "boxery run demo --cwd modem git log -1"], ["Pipes, ~, $VAR and globs need bash -c", "boxery run demo bash -c 'ls ~ | wc -l; echo $HOME'"], ["Not this: one argument is one command name (fails with a hint)", "boxery run demo 'make test'"]],
 			seeAlso: ["jobs", "ssh"], docs: "cli.md#shell-and-in-vm-agents",
 		},
+		status: { vm: true, when: (a) => !a.includes("--bg") }, // --bg returns at once
 		run: async (s, args) => { needHost(s); await cmdRun(s, args); },
 	},
 	cp: {
@@ -495,6 +507,7 @@ export const COMMANDS = {
 			examples: [["This machine to a VM (~/project/repo.bundle)", "boxery cp ./repo.bundle demo:"], ["VM to VM, across named hosts", "boxery cp demo:out.zip hornet/worker:in.zip"]],
 			docs: "copy.md",
 		},
+		status: {},
 		run: cmdCp,
 	},
 	desktop: {
@@ -547,6 +560,7 @@ export const COMMANDS = {
 			flags: [["-f, --follow", "Follow until the job ends"], ["-n, --lines N", "The last N lines"], ["--tail N", "Same as --lines"], ["--bytes N", "Clip each read to its last N bytes"], ["--strip-ansi", "Remove colours and terminal escapes"]],
 			docs: "cli.md#background-command-jobs",
 		},
+		status: { vm: true, when: (a) => a.includes("-f") || a.includes("--follow") }, // only following takes a while
 		run: async (s, args) => { needHost(s); await (await import("./jobs.mjs")).logs(s, args); },
 	},
 	wait: {
@@ -555,6 +569,7 @@ export const COMMANDS = {
 			details: ["Exits 124 if --timeout passes first (the job keeps running) and 125 if the job is lost. Scripts that must tell these from the job's own codes should use --json."],
 			flags: [["--timeout S", "Give up after S seconds"], JSON_FLAG], docs: "cli.md#background-command-jobs",
 		},
+		status: { vm: true },
 		run: async (s, args) => { needHost(s); await (await import("./jobs.mjs")).waitJob(s, args); },
 	},
 	kill: {
@@ -634,6 +649,7 @@ export const COMMANDS = {
 			flags: [["--ttl S", "Lease length in seconds (default 1800)"], ["--wait S", "Wait up to S seconds for a free VM"], ["--holder H", "Who holds the lease, as the host shows it (default: user@machine)"]],
 			seeAlso: ["renew", "release", "leases"], docs: "pool.md",
 		},
+		status: { when: (a) => a.includes("--wait") }, // only waiting for a free VM takes a while
 		run: async (s, args) => { needHost(s); await (await import("./leases.mjs")).leaseCommand(s, "acquire", args); },
 	},
 	renew: {
@@ -670,6 +686,7 @@ export const COMMANDS = {
 		},
 		// GitHub Actions runners on the host's pool (docs/github-runners.md): `once` (local runners) runs here with
 		// this machine's gh login; the rest (host runners) is passed through, and `token` reads stdin.
+		status: { when: (a) => a[0] === "once" }, // once runs a whole job; the rest are host calls
 		run: async (s, args) => {
 			needHost(s);
 			if (args[0] === "once") return (await import("./runners-once.mjs")).runnersOnce(s, args.slice(1));
@@ -689,6 +706,7 @@ export const COMMANDS = {
 			flags: [["--check", "Only report the install, its target version and profiles"], ["--ref REF", "Upgrade to this git ref or npm version"], ["--wait S", "Wait up to S seconds for in-flight operations"], ["--reinit", "Re-run init for every profile even when up to date"]],
 			docs: "install.md#upgrading",
 		},
+		status: { when: (a) => !a.includes("--check") },
 		run: cmdUpgradeHost,
 	},
 	backends: {
@@ -807,7 +825,7 @@ async function main(argv) {
 	const s = await select(name, dir);
 	await withHost(s.host, async () => {
 		await refreshSshConfig({ host: s.host, warn: note });
-		await command(s, args);
+		await reporting(cmd, "status" in entry ? entry.status : undefined, args, () => command(s, args));
 	});
 }
 

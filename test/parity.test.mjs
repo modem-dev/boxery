@@ -122,3 +122,31 @@ test("every family action maps to a tool through its command, or its command say
 	// the older spellings stay mapped: a tool reaches them through the family action that runs them
 	for (const old of ["snap", "snaps", "revert", "snap-rm", "images", "jobs", "logs", "wait", "kill", "grants", "acquire", "renew", "release", "leases", "build-base", "capabilities"]) assert.ok(reached.has(old), `boxery ${old} is no longer reached by any tool's mapping`);
 });
+
+// Terminal status (OSC 7501, for Rex and other terminals that speak it): the long commands report working,
+// done or error through one seam, controller/status.mjs, and declare it with a `status` on their COMMANDS
+// entry. Every command either has one or is listed here with the reason it doesn't, so a new command has to
+// take a side. A `status` is only for commands that run: families route to the command their action runs.
+const QUICK = "returns in about a second: a done record would be noise";
+const FAMILY = "a family: its actions run other commands, which declare their own status";
+const INTERACTIVE = "interactive or a tunnel that runs until Ctrl-C: the program in it reports for itself (pi does), and there is nothing to finish";
+const BEFORE_HOST = "handled before a host is selected, outside the seam";
+const NO_STATUS = {
+	rm: QUICK, pin: QUICK, shapes: QUICK, ls: QUICK, snaps: QUICK, "snap-rm": QUICK, images: QUICK, sessions: QUICK, jobs: QUICK, kill: QUICK,
+	grant: QUICK, revoke: QUICK, grants: QUICK, "agent-forward": QUICK, renew: QUICK, release: QUICK, leases: QUICK, pool: QUICK, version: QUICK,
+	backends: QUICK, capabilities: QUICK, backend: QUICK, "proxy-log": QUICK,
+	prompt: "starts a detached task and returns; the task isn't this process",
+	ssh: INTERACTIVE, attach: INTERACTIVE, forward: INTERACTIVE, desktop: INTERACTIVE,
+	host: FAMILY, snapshot: FAMILY, agent: FAMILY, job: FAMILY, access: FAMILY, lease: FAMILY,
+	setup: BEFORE_HOST, help: BEFORE_HOST,
+};
+
+test("every CLI command declares a terminal status, or says why it has none", () => {
+	const declares = (/** @type {string} */ c) => "status" in COMMANDS[c] && !!COMMANDS[c].status;
+	for (const c of cliCommands()) {
+		assert.ok(declares(c) || c in NO_STATUS, `boxery ${c} is new: give its COMMANDS entry a status (controller/status.mjs), or add it to NO_STATUS in test/parity.test.mjs with a reason`);
+		assert.ok(!(declares(c) && c in NO_STATUS), `boxery ${c} declares a status and is listed in NO_STATUS`);
+	}
+	for (const c of Object.keys(NO_STATUS)) assert.ok(cliCommands().has(c), `NO_STATUS lists boxery ${c}, which controller/cli.mjs doesn't have`);
+	for (const c of cliCommands()) if (declares(c)) assert.ok("run" in COMMANDS[c], `boxery ${c} declares a status but has no run: only a command that runs can report`);
+});

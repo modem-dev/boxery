@@ -19,6 +19,8 @@ export const die = (message, exitCode = 1) => { throw new CliError(message, exit
 export const USAGE = 2;
 /** A usage error: COMMAND's usage lines from its help (controller/usage.mjs usageText). @param {string} command @param {{ sub?: string, hint?: string }} [opts] @returns {never} */
 export const usage = (command, opts) => die(usageText(command, opts), USAGE);
+/** `boxery wait`'s own exit codes (docs/cli.md): --timeout passed (the job keeps running), and a job that was lost. controller/status.mjs reports them. */
+export const WAIT_TIMEOUT = 124, WAIT_LOST = 125;
 /** Exit with CODE, saying nothing (what failed has already said why). @param {number} exitCode @returns {never} */
 export const quit = (exitCode) => { throw new CliError("", exitCode); };
 /** How the person ran boxery: `boxery`, or `boxery --host NAME` when they named the host. Commands that
@@ -98,6 +100,8 @@ export function inherit(cmd, args, { env = process.env, stdin = "inherit", input
 }
 /** A signal (Ctrl-C, TERM, HUP) arrived while the last terminal command ran: ssh then exits 255 itself. */
 let signalled = false;
+/** Whether Ctrl-C (or a TERM, HUP) arrived while the last terminal command ran. Its exit status then says little: ssh exits 255 after one. controller/status.mjs reports such an end as stopped. */
+export const interrupted = () => signalled;
 /** The signal that ended the last terminal command, if one did (cli.mjs then ends with it too, as an exec'd
  *  ssh would have). @type {NodeJS.Signals | null} */
 export let killedBy = null;

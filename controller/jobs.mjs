@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JOBS_NODE, VALID_JOB } from "../core/boxery-core.mjs";
 import { closeMaster } from "../core/profile.mjs";
-import { CliError, die, duration, needVm, note, num, quit, say, usage, vmSsh, vmSshCapture, warn } from "./lib.mjs";
+import { CliError, die, duration, needVm, note, num, quit, say, usage, vmSsh, vmSshCapture, WAIT_LOST, WAIT_TIMEOUT, warn } from "./lib.mjs";
 /** @import { Selected } from "./lib.mjs" */
 
 
@@ -107,7 +107,7 @@ export async function waitJob(s, [vm, job, ...rest]) {
 			// Unreachable from the start: say so now (the job may not exist). A connection that drops while
 			// waiting doesn't affect the job (tmux in the VM): reconnect and keep waiting, within --timeout.
 			if (!reached) die(`cannot reach ${name}`);
-			if (deadline != null && Date.now() / 1000 >= deadline) { warn(`cannot reach ${name}; --timeout passed (the job may still be running)`); quit(124); }
+			if (deadline != null && Date.now() / 1000 >= deadline) { warn(`cannot reach ${name}; --timeout passed (the job may still be running)`); quit(WAIT_TIMEOUT); }
 			if (++drops > 60) die(`cannot reach ${name}; giving up (the job may still be running: boxery jobs ${name})`);
 			warn(`lost the connection to ${name}; reconnecting (the job keeps running)`);
 			await closeMaster(name);
@@ -119,8 +119,8 @@ export async function waitJob(s, [vm, job, ...rest]) {
 		let rec = {};
 		try { rec = JSON.parse(out.split("\n")[0]); } catch { die(`unexpected reply from ${name}: ${out}`); }
 		if (rec.state === "exited") { if (!json) note(`boxery: ${id} exited ${rec.exit_code}`); quit(Number(rec.exit_code) || 0); }
-		if (rec.state === "running") { if (!json) warn(`${id} is still running`); quit(124); }
-		if (rec.state === "lost") { if (!json) warn(`${id} was lost: it stopped without recording an exit code (the VM restarted, or it was killed outside boxery)`); quit(125); }
+		if (rec.state === "running") { if (!json) warn(`${id} is still running`); quit(WAIT_TIMEOUT); }
+		if (rec.state === "lost") { if (!json) warn(`${id} was lost: it stopped without recording an exit code (the VM restarted, or it was killed outside boxery)`); quit(WAIT_LOST); }
 		die(`unexpected reply from ${name}: ${out}`);
 	}
 }
