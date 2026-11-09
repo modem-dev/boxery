@@ -224,21 +224,18 @@ async function cmdSessions(s, [vm, flag]) {
 	say(rows.length ? `[\n${rows.join(",\n")}\n]` : "[]");
 }
 
-/** prompt NAME "task" — a headless pi task in a detached tmux window, logged to ~/project/.boxery/ @param {Selected} s @param {string[]} args @returns {Promise<void>} */
+/** What prompt runs in the VM (pi's print mode) and the job-log flag it points at: constants, so the flags are not prompt's own. */
+const PI_PRINT = ["pi", "-p"], LOG_FOLLOW = "-f";
+/** prompt NAME "task" — a headless pi task, started as a background job (pi -p TASK in ~/project) @param {Selected} s @param {string[]} args @returns {Promise<void>} */
 async function cmdPrompt(s, [name = "", ...words]) {
 	needVm(name);
 	const prompt = words.join(" ");
 	if (!prompt) usage("prompt");
 	await needPiGrant(s, name);
-	const d = new Date(), p2 = (/** @type {number} */ n) => String(n).padStart(2, "0");
-	const id = `task-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
-	const b64 = Buffer.from(prompt).toString("base64");
-	// Ship the prompt base64-encoded and write a tiny runner script: no nested shell quoting.
-	const script = `set -e; d=~/project/.boxery; mkdir -p $d; echo ${b64} | base64 -d > $d/${id}.prompt
-		printf '%s\\n' '#!/bin/bash -l' 'cd ~/project' 'pi -p "$(cat .boxery/${id}.prompt)" </dev/null 2>&1 | tee .boxery/${id}.log' 'echo "[boxery] task finished (exit \${PIPESTATUS[0]})" | tee -a .boxery/${id}.log' 'exec bash -l' > $d/${id}.sh
-		chmod +x $d/${id}.sh; tmux new-session -d -s ${id} -c ~/project $d/${id}.sh`;
-	await exitWith(vmSsh(s, [`${name}.boxery`, script]));
-	say(`started ${id} on ${name} — watch: ${hint("attach", [name, "pi", id])}   log: ${hint("run", [name, "cat", `.boxery/${id}.log`])}`);
+	// A job, like run --bg: job ls, job logs -f, job wait (it exits with pi's status) and job kill work on it.
+	const { startJob } = await import("./jobs.mjs");
+	const id = await startJob(s, name, [...PI_PRINT, prompt].map((w) => Buffer.from(w)), null);
+	say(`started ${id} on ${name} — wait: ${hint("job wait", [name, id])}   logs: ${hint("job logs", [name, id, LOG_FOLLOW])}`);
 }
 
 /** A VM has no LLM access until it is granted, and pi without it fails at once: say so before starting a
@@ -605,7 +602,7 @@ export const COMMANDS = {
 		contract: { terminal: "stdin", payload: "agent" },
 	},
 	prompt: {
-		help: { group: "use", summary: "start a headless pi task in its own tmux session", usage: ['prompt NAME "TASK"'], details: ["It logs to ~/project/.boxery/task-*.log in the VM; attach with boxery attach NAME pi task-…", "pi needs the llm: grant for its provider (llm:chatgpt by default); without it prompt starts nothing and says what to grant."] },
+		help: { group: "use", summary: "start a headless pi task as a background job", usage: ['prompt NAME "TASK"'], details: ["It runs pi -p TASK in ~/project as a background job and prints its id: job ls, job logs -f, job wait (exits with pi's status) and job kill work on it. pi -p prints its answer when it finishes, so the log can stay empty until then.", "pi needs the llm: grant for its provider (llm:chatgpt by default); without it prompt starts nothing and says what to grant."] },
 		run: async (s, args) => { needHost(s); await cmdPrompt(s, args); },
 		contract: { payload: "task" },
 	},
@@ -617,7 +614,7 @@ export const COMMANDS = {
 	agent: {
 		help: {
 			group: "families", summary: "persistent coding-agent sessions in a VM", usage: [],
-			details: ["Sessions are tmux sessions in the VM: they keep running when you detach or disconnect. attach and prompt are also top-level commands, for everyday use."],
+			details: ["attach and ls work on tmux sessions in the VM: they keep running when you detach or disconnect. prompt starts a headless task as a background job (see job). attach and prompt are also top-level commands, for everyday use."],
 			examples: [["Attach to pi (the same as: boxery attach demo)", "boxery agent attach demo"], ["opencode instead", "boxery agent attach demo opencode"], ["A headless task (the same as: boxery prompt …)", "boxery agent prompt demo TASK"], ["The VM's sessions", "boxery agent ls demo"]],
 			seeAlso: ["job"], docs: "cli.md#shell-and-in-vm-agents",
 		},

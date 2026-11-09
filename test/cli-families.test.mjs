@@ -44,6 +44,13 @@ const run = (args, extra = {}) => {
 };
 const sshCalls = () => (existsSync(sshLog) ? readFileSync(sshLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 const calls = () => hostCalls(root);
+/** The words a started job runs: the NUL-separated, base64 argv that `start` sends the VM helper. @param {{ args: string[] }} call */
+const jobArgv = (call) => {
+	const m = /\bstart (\S+) \S+ \S+ --text$/.exec(call.args.at(-1) ?? "");
+	assert.ok(m, `not a job start: ${call.args.at(-1)}`);
+	return Buffer.from(m[1], "base64").toString().split("\0").slice(0, -1);
+};
+
 // (the first call to a host also probes its features with `help`, once: not part of a command)
 /** Everything a command can have left in the registry and the profiles. @param {string} dir @returns {string[]} */
 function tree(dir) {
@@ -372,9 +379,8 @@ test("canonical prompt keeps single help flags as task text; the legacy help con
 		rmSync(sshLog, { force: true });
 		const r = run(["agent", "prompt", "demo", flag], { BOXERY_SSH_REPLY: "\x1e{}\x1e{}\x1e{}" });
 		assert.equal(r.status, 0, r.stderr);
-		assert.match(r.stdout, /started task-/);
-		const script = sshCalls().at(-1).args.at(-1);
-		assert.equal(Buffer.from(/echo (\S+) \| base64 -d/.exec(script)?.[1] ?? "", "base64").toString(), flag);
+		assert.match(r.stdout, /^started \S+ on demo — wait: boxery job wait demo \S+ {3}logs: boxery job logs demo \S+ -f$/m);
+		assert.deepEqual(jobArgv(sshCalls().at(-1)), ["pi", "-p", flag], "pi -p TASK, started as a job");
 		rmSync(sshLog, { force: true });
 		const legacy = run(["prompt", "demo", flag]);
 		assert.equal(legacy.status, 0, legacy.stderr);
@@ -389,8 +395,7 @@ test("payload words are not options: prompt text, run and ssh commands keep ever
 		rmSync(sshLog, { force: true });
 		const r = run([...head, ...words]);
 		assert.equal(r.status, 0, r.stderr);
-		const script = sshCalls().at(-1).args.at(-1);
-		assert.equal(Buffer.from(/echo (\S+) \| base64 -d/.exec(script)?.[1] ?? "", "base64").toString(), words.join(" "), "the task, exactly");
+		assert.deepEqual(jobArgv(sshCalls().at(-1)), ["pi", "-p", words.join(" ")], "the task, exactly");
 		assert.equal(sshCalls().at(-1).profile, profile("alpha"), "--host inside the text selects nothing");
 		assert.equal(existsSync("pwned"), false);
 	}

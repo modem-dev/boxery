@@ -137,11 +137,23 @@ echo "welcome to the VM" >"$tmp/vms/w1/login-output"
 if out=$("$A" prompt w1 say hi 2>&1) || [[ $out != *"needs llm:chatgpt"* ]]; then bad "prompt check with a chatty login: $out"; else ok "prompt's check reads pi's settings after a login script's output"; fi
 rm "$tmp/vms/w1/login-output"
 "$A" grant w1 llm:chatgpt >/dev/null 2>&1
-out=$("$A" prompt w1 say hi 2>&1) && [[ $out == *"started task-"* ]] && ok "prompt with pi's llm grant starts the task" || bad "prompt with the grant: $out"
-# The log hint works as printed: run starts in ~/project. (tmux is a stub here, so write the log ourselves.)
-log=$(sed -n 's/.*log: boxery run w1 cat \(\.boxery\/task-[0-9-]*\.log\)$/\1/p' <<<"$out")
-[[ -n $log ]] && echo "task log" >"$tmp/vms/w1/home/project/$log"
-[[ -n $log && $("$A" run w1 cat "$log" 2>&1) == "task log" ]] && ok "prompt's log hint names the log under ~/project" || bad "prompt log hint: $out"
+# With the grant, prompt starts pi -p TASK as a job (the same way as run --bg). tmux is a stub here: it only
+# records the launch like a runner that has started the command (the job's .pid), without running anything.
+cat >"$tmp/bin/tmux" <<'STUB'
+#!/bin/sh
+if [ "$1" = new-session ]; then
+	for last; do :; done
+	set -- $last
+	jd=$(printf %s "$3" | tr -d "'"); id=$4
+	echo "$$ " >"$jd/$id.pid"
+fi
+exit 0
+STUB
+chmod +x "$tmp/bin/tmux"
+out=$("$A" prompt w1 say hi 2>&1) && [[ $out == "started job-"*" on w1 — wait: boxery job wait w1 job-"*"   logs: boxery job logs w1 job-"*" -f" ]] && ok "prompt with pi's llm grant starts the task as a job" || bad "prompt with the grant: $out"
+job=$(sed -n 's/^started \(job-[0-9a-f-]*\) on w1.*/\1/p' <<<"$out")
+# The job runs `pi -p say hi`, the words after the VM name as one task, in ~/project.
+[[ $(tr '\0' '|' <"$tmp/vms/w1/home/.boxery/jobs/$job.argv" 2>&1) == "pi|-p|say hi|" ]] && ok "prompt's job runs pi -p with the task as one argument" || bad "prompt job argv: $(tr '\0' '|' <"$tmp/vms/w1/home/.boxery/jobs/$job.argv" 2>&1)"
 "$A" revoke w1 llm:chatgpt >/dev/null 2>&1
 # attach runs only its three tools, and says what to use instead when there is no terminal. With python3
 # (not in every test image), the cases run on a pseudo-terminal too, as a person's attach does.

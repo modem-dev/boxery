@@ -215,6 +215,25 @@ describe("background jobs", { skip }, () => {
 		await wait(await start(["--", "-x"]), 127);
 	});
 
+	test("prompt starts pi -p TASK as a job: job ls lists it, job wait exits with pi's status, job logs has its output", async () => {
+		const pi = path.join(bin, "pi");
+		writeFileSync(pi, "#!/bin/bash\npwd | tr -d '\\n'\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\nexit 7\n");
+		chmodSync(pi, 0o755);
+		try {
+			const task = "fix the tests; echo $HOME";
+			const r = await cli(["prompt", "fakevm", task]);
+			assert.equal(r.code, 0, r.stderr);
+			const id = /^started (\S+) on fakevm/.exec(r.stdout)?.[1] ?? "";
+			assert.match(id, ID);
+			assert.ok(r.stdout.includes(`boxery job wait fakevm ${id}`) && r.stdout.includes(`boxery job logs fakevm ${id} -f`), r.stdout);
+			await wait(id, 7); // job wait exits with pi's own status
+			assert.equal((await cli(["logs", "fakevm", id])).stdout, `${path.join(vmhome(), "project")}[-p][${task}]`, "pi -p TASK, the task as one word, in ~/project");
+			assert.ok((await jobs()).some((j) => j.id === id && j.state === "exited" && j.exit_code === 7), "job ls shows the task");
+		} finally {
+			rmSync(pi, { force: true });
+		}
+	});
+
 	test("--cwd matches run; NAME --bg also works; a missing cwd is a recorded failure", async () => {
 		for (const [cwd, expected] of [["dir with space", "project/dir with space"], ["~", ""], ["~/project", "project"], [vmhome(), ""]]) {
 			const r = await cli(["run", "fakevm", "--bg", "--cwd", cwd, "pwd"]);

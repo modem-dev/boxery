@@ -25,7 +25,7 @@ Work in a VM:
   desktop NAME                          Open a VM's desktop in your browser (noVNC over ssh)
   forward NAME PORT [LOCAL]             Forward a VM port to localhost
   attach NAME [AGENT]                   Attach to an agent in a persistent tmux session (= agent attach)
-  prompt NAME "TASK"                    Start a headless pi task in its own tmux session (= agent prompt)
+  prompt NAME "TASK"                    Start a headless pi task as a background job (= agent prompt)
 
 Command families (boxery FAMILY --help):
   host add|ls|show|use|rm|…             Named hosts, and maintenance of the selected host

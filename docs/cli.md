@@ -122,7 +122,7 @@ boxery run demo --cwd app pnpm test          # in ~/project/app
 boxery run demo bash -c 'make test 2>&1 | tail'   # a shell line: bash -c
 boxery attach demo                           # pi in tmux. Ctrl-b d detaches; it keeps running.
 boxery attach demo opencode                  # or: shell
-boxery prompt demo "fix the failing tests and commit"   # headless pi task in its own tmux session
+boxery prompt demo "fix the failing tests and commit"   # headless pi task, as a background job (job wait/logs)
 boxery agent ls demo [--json]                # list tmux sessions
 ```
 
@@ -150,7 +150,7 @@ boxery --host hornet cp local:notes.md ci-1:~/notes.md
 
 `boxery sync demo [--from DIR] [--to PATH] [--json]` pushes a local git checkout into a VM so its tree matches exactly (commits by `git push` over the VM's ssh connection, plus uncommitted and untracked changes); it is the `vm_sync` tool's own code ([sync](sync.md)).
 
-`attach` starts pi, opencode or a shell (nothing else) and needs a terminal; without one it says to use `prompt` or `run --bg`, which work headless. `prompt` logs to `~/project/.boxery/task-*.log` in the VM. Attach to a task with `boxery attach demo pi task-…`. pi needs the `llm:` grant for its provider (`llm:chatgpt` unless you changed pi's settings in the VM), and a new VM has none: `prompt` checks first and, if it's missing, starts nothing and prints the `boxery grant` command to run (the older spelling of `boxery access grant`).
+`attach` starts pi, opencode or a shell (nothing else) and needs a terminal; without one it says to use `prompt` or `run --bg`, which work headless. `prompt` starts `pi -p TASK` in `~/project` as a background job and prints its id, so `job ls`, `job logs -f`, `job wait` (exits with pi's status) and `job kill` work on it; `pi -p` prints its answer when it finishes, so the log can stay empty until then. pi needs the `llm:` grant for its provider (`llm:chatgpt` unless you changed pi's settings in the VM), and a new VM has none: `prompt` checks first and, if it's missing, starts nothing and prints the `boxery grant` command to run (the older spelling of `boxery access grant`).
 
 ### Background command jobs
 
@@ -316,7 +316,7 @@ Generated from the help `boxery help --all` shows (`controller/cli.mjs`); edit i
 | `boxery desktop NAME [--no-open]` | Open a VM's desktop in your browser (noVNC over ssh) [→](#desktop-and-ports) |
 | `boxery forward NAME PORT [LOCAL_PORT]` | Forward a VM port to localhost |
 | `boxery attach NAME [pi\|opencode\|shell] [SESSION]` | Attach to an agent in a persistent tmux session (= agent attach) |
-| `boxery prompt NAME "TASK"` | Start a headless pi task in its own tmux session (= agent prompt) |
+| `boxery prompt NAME "TASK"` | Start a headless pi task as a background job (= agent prompt) |
 
 **Command families (boxery FAMILY --help)**
 
@@ -362,7 +362,7 @@ Generated from the help `boxery help --all` shows (`controller/cli.mjs`); edit i
 | Command | What it does |
 |---|---|
 | `boxery agent attach NAME [pi\|opencode\|shell] [SESSION]` | Attach to an agent in a persistent tmux session |
-| `boxery agent prompt NAME "TASK"` | Start a headless pi task in its own tmux session |
+| `boxery agent prompt NAME "TASK"` | Start a headless pi task as a background job |
 | `boxery agent ls NAME [--json]` | List a VM's tmux sessions |
 
 **boxery job — background jobs in a VM (run --bg starts one)**
