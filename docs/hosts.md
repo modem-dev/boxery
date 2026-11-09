@@ -63,7 +63,7 @@ On the host, `boxery-host profiles` lists every profile (backend, port, service,
 
 ## Where each host runs
 
-`boxery host ls` (and `--json`, and MCP `vm_info {action:"hosts"}`) says where each registered host runs, read from local profile files without contacting any host:
+`boxery host ls` (and `--json`, and MCP `vm_info {action:"hosts"}`) describes registered hosts from local profile files rather than requesting live host inventory. A computed CLI profile is trusted shell code and can run its own commands, so local metadata scope is not a network sandbox:
 
 ```text
 NAME	DEFAULT	CONFIG_DIR	DESTINATION	BACKEND	SAME_AS
@@ -73,8 +73,10 @@ local	*	/home/you/.boxery/profiles/local	local	lima	-
 ```
 
 * **DESTINATION** is the profile's `HOST`: `local` means the VM host is the machine running the controller (or the MCP server); otherwise it is the ssh destination or ssh-config alias. The CLI sources the trusted profile config to find it; MCP never executes it and parses only plain assignments (as `setup` writes them), so a computed value shows as unknown (`-` / `null`).
-* **BACKEND** lives on the VM host (`host.env`), so it is not read live. `setup` and `host add` record it in the profile's `backend` file (one line of data); `boxery [--host NAME] backend` asks the host and refreshes the record. Profiles set up earlier, or hosts that predate `boxery-host backend`, show `-` / `null` until then.
+* **BACKEND** lives on the VM host (`host.env`), so it is not read live. `setup` and `host add` record it in the profile's `backend` file (one line of data); `boxery [--host NAME] host backend` asks the host and refreshes the record. Profiles set up earlier, or hosts that predate `boxery-host backend`, show `-` / `null` until then.
 * **SAME_AS** lists the other names for the same host: registered for the same profile directory (for example after `host add laptop --config-dir ~/.boxery/profiles/local`), or for the same destination and host-side profile (`host add lab2 local --profile exe` next to an `exe` host already registered for that profile, which gets a directory of its own). `local` and `laptop` are one host with the same VMs, not two, and `ls` lists them once. The host-side profile is read from `HOST_PROFILE`, or, for a registration from before host profiles whose `HOST_BIN` is a wrapper script on this machine, from the wrapper's `BOXERY_CONF=$HOME/.config/boxery-P` or `--profile P` when those are literal and agree (anything else, or a wrapper on another machine, matches only by directory). Grants and lease keys stay with each name's profile directory: `--host lab2 grant …` is lab2's, and `ls` shows it in that host's section as `grants (lab2) …`, next to the listed name's own.
+
+Selected-host queries are different from registry inspection: `boxery ls` asks the hosts for VM inventory; `host capabilities` and `host backends` run discovery on the selected host (over SSH when remote). Even read-only queries can refresh local SSH configuration, feature caches and control connections. `host add NAME DEST` also contacts its explicit destination for setup; it does not use the selected host. See [query sources](cli.md#read-only-is-not-necessarily-offline).
 
 ## Importing two existing profiles
 

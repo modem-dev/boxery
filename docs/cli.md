@@ -13,6 +13,7 @@
 Exit status: `0` on success; a command that runs something in the VM (`run`, `ssh`, `attach`, `wait` and the like) exits with its status, so a script can't tell boxery's codes from the command's. boxery's own failures exit `1`, and its usage errors (an unknown command or flag, a missing argument or flag value, arguments that don't fit the command's usage) exit `2`. A value that is refused (an invalid name, a VM that doesn't exist) is a failure, `1`, and so is a usage error that the host reports for a command boxery passes to it (`images`, `pool`, `runners`, …).
 
 - [Command families](#command-families)
+- [Read-only queries and offline behavior](#read-only-is-not-necessarily-offline)
 - [All commands](#all-commands), generated from the same help
 
 ### Command families
@@ -37,6 +38,23 @@ The everyday commands stay top level: `new`, `ls`, `start`, `stop`, `rm`, `resiz
 - **Mistakes.** An unknown action names the family's actions (`unknown snapshot action: restroe (did you mean restore?); actions: …`) and exits 2, before any host, profile or grant is read.
 - **Payload words are not options.** `boxery run` and `boxery ssh` hand every word after the VM name to the VM, `--help` included. Family actions recognise help only immediately after the action (`job logs --help`), so `agent prompt demo --help` sends `--help` as task text. Older top-level spellings retain their help conventions, including `snap demo --help` and `prompt demo --help`.
 
+### Read-only is not necessarily offline
+
+A read-only query does not request changes to VM software or permissions. It can still contact a host and refresh metadata or connection caches:
+
+| Query | Source and contact |
+|---|---|
+| `host ls`, `host show` | Local registry/profile metadata; `host ls` uses the recorded backend, not a live host query. |
+| `access ls NAME`, `grants NAME` | This controller's grant records. With none, asks the selected host whether the VM exists. If inventory is unavailable, falls back to no locally recorded grants. |
+| `ls` | Live inventory from the host(s), but cached guest-software records. `--refresh` queries running guests and updates those records; it does not patch software. An unreachable host causes exit 1 after other hosts are listed. |
+| `host backends`, `host capabilities` | Declarations and local requirement checks on the selected host, reached over SSH when remote. No backend startup or provider requests. |
+| `host backend` | Live host backend, then a refresh of this controller's recorded backend. |
+| `version` | Controller only before setup; otherwise also queries the selected host. An unreachable host is reported as unknown without failing the controller version report. |
+
+In particular, an empty grant list is **not an audit of every controller's access**. Listing never executes grant value commands, reads granted files/environment values, or reapplies permissions; stored `--cmd` text is still visible ([Grants](grants.md)).
+
+Ordinary selected-host dispatch can refresh `ssh_config`, feature-cache files and SSH control connections even for a query. Registry scope is not an offline promise either: `host add NAME DEST` runs setup at its explicit destination, unlike an import with `--config-dir`. Plain setup-generated profiles contain assignments; a computed profile is a trusted shell program whose own network and filesystem effects are not constrained by the query's read-only intent.
+
 ### Named hosts
 
 ```bash
@@ -59,7 +77,7 @@ Without `--host`, `ls` lists every registered host's VMs under one header, a sec
 ### Backend discovery
 
 `boxery host backends [--json]` lists backend platform support, requirements and capabilities.
-`boxery host capabilities [--json | --check]` assesses the selected **host**, not the controller.
+`boxery host capabilities [--json | --check]` assesses the selected **host**, not the controller. Both commands run boxery-host on that host (over SSH when remote), even though their discovery handlers neither start a backend nor contact a provider.
 Both are also available as the top-level `backends` and `capabilities`, and directly as `boxery-host` commands. Agents use
 `vm_info {action:"capabilities"}`. See the [metadata contract](backends.md) for
 supported versus tested configurations and conditional features. Setup checks
@@ -723,7 +741,7 @@ The controller (`boxery acquire`, `vm_lease`) asks for it when the host's `help`
 | `~/.boxery/host-registry/HOST`, `~/.boxery/default-host` | Registered hosts and the default one ([Named hosts](hosts.md)) |
 | `~/.boxery/profiles/HOST/config` | Controller: host, host binary path, identity |
 | `~/.boxery/profiles/HOST/ssh_config` | Generated. `*.boxery` hosts via `ProxyCommand`. |
-| `~/.boxery/profiles/HOST/grants/NAME` | Grant names and paths (never values) |
+| `~/.boxery/profiles/HOST/grants/NAME` | Grant specifications, paths and command text (not resolved values) |
 | `~/.boxery/profiles/HOST/leases/` | Your leases and their per-lease ssh keys |
 | `~/.config/boxery/host.env` (host) | Backend and overrides (`BOXERY_BACKEND`, `BOXERY_LIMA_VMTYPE`, …) |
 | `~/.config/boxery/proxy.env` (host) | Extra LLM provider keys (VMs still need an `llm:` grant to use them) |

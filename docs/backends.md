@@ -3,7 +3,7 @@
 Query the declarations with `boxery host backends --json` (or `boxery-host backends --json`; `boxery backends` is the older spelling).
 Query the **selected host's** configuration and local requirements with
 `boxery host capabilities --json`. Agents use `vm_info {action:"capabilities"}` in both
-MCP and pi. These queries do not start a backend, contact a provider or change files.
+MCP and pi. These discovery handlers run on the selected **host**, over SSH when it is remote; they do not start a backend, contact its provider or change backend configuration. The controller may still refresh its SSH configuration, feature-cache files or control connections. Read-only discovery is not an offline guarantee.
 Use `boxery host capabilities --check` for setup preflight (nonzero on unsupported
 configurations or missing locally checkable setup requirements).
 

@@ -19,7 +19,13 @@ boxery access ls demo                                             # saved kinds 
 boxery access revoke demo env:GH_TOKEN                            # or: access revoke demo all
 ```
 
-`access ls` reads saved specifications without running value commands, reading granted files or environment values, or reapplying access. With none recorded, it asks the host whether the VM exists, so a typo reports `no such vm` rather than `no grants`. Stored `--cmd` text is shown verbatim, so a secret embedded in a command literal would be visible. Use commands that read a secret store instead.
+## Listing: read-only, not necessarily offline
+
+`access ls` (also `grants NAME`) reads **this controller's** saved specifications. With records, it needs no host inventory query; with none, it asks the selected host whether the VM exists, so a typo reports `no such vm` rather than `no grants`. If inventory cannot be read, including when the host is unreachable, it falls back to no locally recorded grants. An empty list is not proof that other controllers have granted no access.
+
+Listing never executes grant value commands, reads granted files or environment values, or reapplies access. Stored `--cmd` text is shown verbatim, so a secret embedded in a command literal would be visible. Use commands that read a secret store instead. As with other selected-host commands, ordinary dispatch may refresh SSH configuration, feature caches or control connections; read-only refers to permissions, not an offline or filesystem-free execution guarantee.
+
+## Grant at creation or from pi
 
 You can also grant at creation time, or from pi:
 

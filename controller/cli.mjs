@@ -330,6 +330,8 @@ const CAPTURE_NOTE = "Most backends capture a running VM live (libvirt and cloud
 const SIZE_FLAGS = /** @type {[string, string][]} */ ([["--shape S", "A size from boxery shapes"], ["--cpus N", "CPUs"], ["--mem MiB", "Memory, in MiB"], ["--disk GiB", "Disk, in GiB"]]);
 const HOST_MGMT = "--host does not apply to host management";
 const RUN_RULES = "Arguments are passed exactly as given, like docker exec: quotes, $, ~, globs and ; are not re-parsed in the VM. For pipes, &&, ~ or $VAR, run a shell: bash -c '...'.";
+const PROFILE_QUERY_NOTE = "Selected-host commands may refresh this controller's SSH configuration, feature cache and control connections. Read-only does not mean offline or no local cache writes; trusted computed profile configs can also run their own commands.";
+const GRANT_LIST_NOTE = "Listing reads this controller's saved grant specifications, not every controller's permissions. With records, no inventory query is needed; with none, the host is asked whether the VM exists. If inventory cannot be read, listing falls back to no locally recorded grants, not proof that the VM has no access. Listing never executes value commands or reads granted files or environment values; stored --cmd text is shown verbatim, so keep secrets out of command literals.";
 
 /** Every boxery command and its help (boxery help and COMMAND --help are rendered from this). @type {Record<string, Entry>} */
 export const COMMANDS = {
@@ -350,7 +352,7 @@ export const COMMANDS = {
 		defaultAction: "ls",
 		help: {
 			group: "families", summary: "named hosts, and maintenance of the selected host", list: "host add|ls|show|use|rm|…", usage: [],
-			details: ["add, ls, show, use and rm manage this machine's registry and take no --host. add NAME DEST runs setup on DEST; importing --config-dir and the other registry actions stay local. Maintenance actions act on the selected host (--host NAME, else the default)."],
+			details: ["add, ls, show, use and rm manage this machine's registry and take no --host. add NAME DEST runs setup on DEST; importing --config-dir and the other registry actions make no Boxery host requests. Trusted computed profile configs can run their own commands. Maintenance actions use the selected host (--host NAME, else the default), locally or over SSH."],
 			examples: [["Add a second machine and make it the default", "boxery host add hornet you@hornet && boxery host use hornet"], ["One command on another host", "boxery --host hornet ls"], ["Upgrade boxery on a registered host", "boxery --host hornet host upgrade --check"]],
 			seeAlso: ["setup"], docs: "hosts.md",
 		},
@@ -364,7 +366,7 @@ export const COMMANDS = {
 					examples: [["A machine you reach over ssh", "boxery host add hornet you@hornet"], ["A second backend on this machine", "boxery host add exe local --backend exe"]], docs: "hosts.md",
 				},
 			},
-			ls: { scope: "registry", noHost: HOST_MGMT, help: { summary: "list hosts: where each runs and its backend", usage: ["host ls [--json]"], flags: [JSON_FLAG], docs: "hosts.md" } },
+			ls: { scope: "registry", noHost: HOST_MGMT, help: { summary: "list hosts: where each runs and its backend", usage: ["host ls [--json]"], details: ["Reads the local registry, profile settings and recorded backend without requesting host inventory. A computed profile is a trusted shell program, not an offline sandbox; the CLI may source it to find its destination."], flags: [JSON_FLAG], docs: "hosts.md" } },
 			show: { scope: "registry", noHost: HOST_MGMT, help: { summary: "print a host's profile directory", usage: ["host show NAME"], docs: "hosts.md" } },
 			use: { scope: "registry", noHost: HOST_MGMT, help: { summary: "make NAME the default host", usage: ["host use NAME"], docs: "hosts.md" } },
 			rm: { scope: "registry", noHost: HOST_MGMT, help: { summary: "forget a host (its VMs and profile data stay)", usage: ["host rm NAME"], docs: "hosts.md" } },
@@ -386,7 +388,7 @@ export const COMMANDS = {
 	ls: {
 		help: {
 			group: "vms", summary: "list VMs: every host's, a section each (--host NAME: one)", usage: ["ls [--json] [--refresh] [--running]"],
-			details: ["One header for every host's rows. STATUS says what is worth knowing about a VM: its pool lease, outdated guest software (see boxery patch) and grants. Notes come after the table, on stderr; a host that can't be reached fails ls once the others are listed. --json lists one host."],
+			details: ["One header for every host's rows. STATUS says what is worth knowing about a VM: its pool lease, outdated guest software (see boxery patch) and grants. Notes come after the table, on stderr; a host that can't be reached fails ls once the others are listed. --json lists one host.", "Always asks the selected hosts for inventory. Guest software records are cached on each host; --refresh queries running guests and updates those records, without patching guest software.", PROFILE_QUERY_NOTE],
 			flags: [JSON_FLAG, ["--refresh", "Read the guest software record from each running VM first"], ["--running", "Only running VMs"]],
 			examples: [["Every host's VMs", "boxery ls"], ["One host's running VMs", "boxery --host hornet ls --running"]],
 			seeAlso: ["patch", "host"], docs: "cli.md#lifecycle",
@@ -653,7 +655,7 @@ export const COMMANDS = {
 		run: async (s, args) => { needHost(s); await (await grants()).revoke(s, args); },
 	},
 	grants: {
-		help: { group: "legacy", summary: "show a VM's grants, or push them again (apply)", list: "grants NAME [apply]", usage: ["grants NAME [apply [--quiet] | --json]"], flags: [JSON_FLAG], docs: "grants.md" },
+		help: { group: "legacy", summary: "show a VM's grants, or push them again (apply)", list: "grants NAME [apply]", usage: ["grants NAME [apply [--quiet] | --json]"], details: [GRANT_LIST_NOTE, "apply pushes existing grants again; listing never grants, revokes or applies.", PROFILE_QUERY_NOTE], flags: [JSON_FLAG], docs: "grants.md" },
 		run: async (s, args) => (await grants()).grantsCommand(s, args),
 	},
 	"agent-forward": {
@@ -676,7 +678,7 @@ export const COMMANDS = {
 			ls: {
 				command: "grants",
 				args: (a) => { if (a.length > 2 || (a.length === 2 && a[1] !== "--json")) usage("access", { sub: "ls" }); return a; },
-				help: { summary: "show a VM's grant kinds and settings (read-only)", usage: ["access ls NAME [--json]"], details: ["Shows saved specifications, including --cmd text, without executing value commands or reading granted files or environment values. With none recorded, checks the host's inventory to catch a missing VM. A secret embedded in a command literal is therefore visible; use commands that read a secret store instead."], examples: [["What demo has been granted", "boxery access ls demo"]] },
+				help: { summary: "show a VM's grant kinds and settings (read-only)", usage: ["access ls NAME [--json]"], details: [GRANT_LIST_NOTE, PROFILE_QUERY_NOTE], examples: [["What demo has been granted", "boxery access ls demo"]] },
 			},
 			apply: {
 				command: "grants",
@@ -745,7 +747,7 @@ export const COMMANDS = {
 
 	// ------------------------------------------------ host & diagnostics
 	version: {
-		help: { group: "more", summary: "controller and host versions; warns when the host is behind", usage: ["version [--json]"], details: ["boxery --version and boxery -V are the same as boxery version."], flags: [JSON_FLAG], seeAlso: ["host upgrade"] },
+		help: { group: "more", summary: "controller and host versions; warns when the host is behind", usage: ["version [--json]"], details: ["boxery --version and boxery -V are the same as boxery version.", "Without a configured host, reports only the controller. Otherwise queries the selected host; an unreachable host is reported as unknown without failing the controller version report."], flags: [JSON_FLAG], seeAlso: ["host upgrade"] },
 		run: async (s, args) => cmdVersion(s, args),
 		local: (args) => cmdVersion(null, args),
 		contract: { hostOptional: true },
@@ -761,15 +763,15 @@ export const COMMANDS = {
 		run: cmdUpgradeHost,
 	},
 	backends: {
-		help: { group: "legacy", summary: "backend support, requirements and capabilities", usage: ["backends [--json]"], flags: [JSON_FLAG], docs: "backends.md" },
+		help: { group: "legacy", summary: "backend support, requirements and capabilities", usage: ["backends [--json]"], details: ["Reads declarations from boxery-host on the selected host (over SSH for a remote host), not from the controller's platform. No provider requests or backend startup.", PROFILE_QUERY_NOTE], flags: [JSON_FLAG], docs: "backends.md" },
 		run: async (s, args) => hostPass(s, ["backends", ...args]),
 	},
 	capabilities: {
-		help: { group: "legacy", summary: "the selected host's platform and capabilities", usage: ["capabilities [--json | --check]"], flags: [JSON_FLAG, ["--check", "Run the backend preflight; fails when a requirement is missing"]], docs: "backends.md" },
+		help: { group: "legacy", summary: "the selected host's platform and capabilities", usage: ["capabilities [--json | --check]"], details: ["Queries and checks requirements on the selected host, locally or over SSH. Does not start a backend or contact its provider; --check fails when a locally checkable requirement is missing.", PROFILE_QUERY_NOTE], flags: [JSON_FLAG, ["--check", "Run the backend preflight; fails when a requirement is missing"]], docs: "backends.md" },
 		run: async (s, args) => hostPass(s, ["capabilities", ...args]),
 	},
 	backend: {
-		help: { group: "legacy", summary: "the host's VM backend (recorded for host ls)", usage: ["backend"] },
+		help: { group: "legacy", summary: "the host's VM backend (recorded for host ls)", usage: ["backend"], details: ["Asks the selected host for its current backend and updates the controller's recorded backend used by host ls.", PROFILE_QUERY_NOTE] },
 		run: async (s, args) => { needHost(s); await backendCommand(s.host, args); },
 	},
 	"proxy-log": {
