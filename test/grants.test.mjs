@@ -86,6 +86,20 @@ test("real PTY: No and empty answer decline; Yes applies; CLI and vm_grant share
 	assert.equal(existsSync(store), false);
 });
 
+test("real PTY: Ctrl-C at the approval prompt ends the command at once; the terminal status says blocked, not working", () => {
+	writeFileSync(path.join(profile, "grants/source"), "ssh-agent\t\t\n");
+	process.env.BOXERY_STATUS = "1";
+	try {
+		for (const args of [["new", "demo", "--grant", "ssh-agent"], ["fork", "source", "demo", "--grants"]]) {
+			// (The fixture would raise after 15 s if Ctrl-C only ran a handler once the blocking read returned.)
+			const r = terminal(args, "\x03");
+			assert.ok(r.code < 0, `${args[0]}: ended by the signal, not exit ${r.code}\n${r.output}`);
+			assert.match(r.output, /\x1b\]7501;state=working:app=boxery:msg=[A-Za-z0-9+/=]+\x1b\\[\s\S]*\x1b\]7501;state=blocked:kind=permission:app=boxery:msg=/);
+			assert.equal(existsSync(path.join(root, "host.calls")), false, "nothing was created");
+		}
+	} finally { delete process.env.BOXERY_STATUS; }
+});
+
 test("real PTY: creation and fork grants ask before lifecycle effects", () => {
 	writeFileSync(path.join(profile, "grants/source"), "ssh-agent\t\t\n");
 	for (const args of [["new", "demo", "--grant", "ssh-agent"], ["new", "demo", "--agent-forward"], ["fork", "source", "demo", "--grants"]]) {

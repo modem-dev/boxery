@@ -133,6 +133,19 @@ async function cmdRun(s, args) {
 	if (rc) throw new CliError("", rc);
 }
 
+/** Whether run's own options ask for a background job: --bg first, or among the options right after NAME
+ *  (before `--` and the command). Keep it in step with cmdRun's option loop below; test/status.test.mjs lists the cases.
+ *  @param {string[]} args */
+export function runsInBackground(args) {
+	if (args[0] === "--bg") return true;
+	for (let i = 1; i < args.length; i++) {
+		if (args[i] === "--cwd") i++;
+		else if (args[i] === "--bg") return true;
+		else break;
+	}
+	return false;
+}
+
 /** @returns {never} */
 const runUsage = () => usage("run", { hint: "a shell line: ... bash -c 'A | B'; see: boxery run --help" });
 
@@ -497,7 +510,7 @@ export const COMMANDS = {
 			examples: [["Args are passed as-is: quotes, $, *, ; stay literal", "boxery run demo pnpm test"], ["In ~/project/modem", "boxery run demo --cwd modem git log -1"], ["Pipes, ~, $VAR and globs need bash -c", "boxery run demo bash -c 'ls ~ | wc -l; echo $HOME'"], ["Not this: one argument is one command name (fails with a hint)", "boxery run demo 'make test'"]],
 			seeAlso: ["jobs", "ssh"], docs: "cli.md#shell-and-in-vm-agents",
 		},
-		status: { vm: true, when: (a) => !a.includes("--bg") }, // --bg returns at once
+		status: { vm: true, when: (a) => !runsInBackground(a) }, // --bg returns at once
 		run: async (s, args) => { needHost(s); await cmdRun(s, args); },
 	},
 	cp: {
@@ -649,7 +662,7 @@ export const COMMANDS = {
 			flags: [["--ttl S", "Lease length in seconds (default 1800)"], ["--wait S", "Wait up to S seconds for a free VM"], ["--holder H", "Who holds the lease, as the host shows it (default: user@machine)"]],
 			seeAlso: ["renew", "release", "leases"], docs: "pool.md",
 		},
-		status: { when: (a) => a.includes("--wait") }, // only waiting for a free VM takes a while
+		status: { when: (a) => a.some((w, i) => w === "--wait" && Number(a[i + 1]) > 0) }, // only waiting for a free VM takes a while
 		run: async (s, args) => { needHost(s); await (await import("./leases.mjs")).leaseCommand(s, "acquire", args); },
 	},
 	renew: {
@@ -675,6 +688,7 @@ export const COMMANDS = {
 	},
 	pool: {
 		help: { group: "families", summary: "manage the shared pool of leasable VMs (admin)", usage: ["pool add NAME", "pool rm NAME [--force]", "pool ls [--json]"], list: "pool add|rm|ls", docs: "pool.md" },
+		status: { vm: 1, when: (a) => a[0] === "add" }, // add captures the VM's clean snapshot (a restart on Lima); rm and ls are quick
 		run: async (s, args) => { needHost(s); await lc(() => lifecycle.pool(args, passthrough())); },
 	},
 	runners: {

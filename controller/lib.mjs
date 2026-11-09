@@ -101,7 +101,7 @@ export function inherit(cmd, args, { env = process.env, stdin = "inherit", input
 /** A signal (Ctrl-C, TERM, HUP) arrived while the last terminal command ran: ssh then exits 255 itself. */
 let signalled = false;
 /** Whether Ctrl-C (or a TERM, HUP) arrived while the last terminal command ran. Its exit status then says little: ssh exits 255 after one. controller/status.mjs reports such an end as stopped. */
-export const interrupted = () => signalled;
+export const wasInterrupted = () => signalled;
 /** The signal that ended the last terminal command, if one did (cli.mjs then ends with it too, as an exec'd
  *  ssh would have). @type {NodeJS.Signals | null} */
 export let killedBy = null;

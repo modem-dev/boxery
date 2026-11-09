@@ -261,15 +261,17 @@ Long commands tell the terminal what they're doing, with the [Program Status Pro
 | Reports | When |
 |---|---|
 | `run`, `wait`, `new`, `fork`, `start`, `stop`, `resize`, `patch`, `snap`, `revert`, `build-base`, `cp`, `upgrade-host` | always (`run --bg` and `upgrade-host --check` return at once, so they don't) |
+| `pool add` | always (the other `pool` actions are quick) |
 | `logs` | with `-f` |
-| `acquire` | with `--wait` |
-| `runners once` | always (the other `runners` actions are host calls) |
+| `acquire` | with `--wait N`, N above 0 |
+| `runners once` | always, including the time it waits for a GitHub job to pick up the runner (the other `runners` actions are host calls) |
 
 A family action (`job wait`, `lease acquire`, `snapshot create`, …) reports through the command it runs. Quick commands (`ls`, `jobs`, `grants`, …) don't report, and neither do `ssh`, `attach`, `forward` and `desktop`, which are interactive or a tunnel with nothing to finish.
 
-- **Outcome:** `working` while it runs, then `done` (exit 0), `error` (anything else, with the exit code), or `idle` when you stop it with Ctrl-C. `wait` also reports `idle` when `--timeout` passes (exit 124) and `error` for a lost job (125). The message is only the VM name, the command and the outcome (`demo: run failed (exit 2)`), never the command's output.
+- **Outcome:** `working` while it runs, then `done` (exit 0), `error` (anything else, with the exit code), or `idle` when you stop it with Ctrl-C. `wait` reports `done` with "timed out (the job is still running)" when `--timeout` passes (exit 124) and `error` for a lost job (125). A mistake in the command line (a usage error, exit 2 with a usage message) reports `idle`, not a failure. The message is only the VM name, the command and the outcome (`demo: run failed (exit 2)`), never the command's output.
+- **Waiting for you:** the grant approval prompt of `new --grant` and `fork --grants` reports `blocked` (a permission), not `working`. Ctrl-C at the prompt ends the command as usual, and the terminal drops the blocked record when the process exits.
 - **Only on a terminal:** it's written to stderr, and only when stderr is a terminal and `TERM` isn't `dumb`. Pipes, logs and CI never see it, and neither does stdout. Agents using the `vm_*` tools capture output, so they get none of it.
-- **`BOXERY_STATUS=0`** turns it off. `BOXERY_STATUS=1` forces it on even when stderr isn't a terminal (used by the tests).
+- **`BOXERY_STATUS=0`** turns it off, and so does any value that isn't `auto` or a yes. `BOXERY_STATUS=1` forces it on even when stderr isn't a terminal (used by the tests; don't set it in a profile, or output that agents capture gets the sequences).
 - Inside `boxery attach` it doesn't reach your terminal: tmux drops sequences it doesn't know.
 - A command declares it with a `status` on its entry in `controller/cli.mjs`'s `COMMANDS` (`controller/status.mjs`); `test/parity.test.mjs` fails for a command that neither declares one nor says why not.
 

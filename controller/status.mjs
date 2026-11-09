@@ -7,28 +7,28 @@
 // COMMANDS entry. No command reports anything itself. test/parity.test.mjs checks that every command either
 // declares one or says why it has none.
 import { constants } from "node:os";
-import { CliError, interrupted, VALID_VM, WAIT_LOST, WAIT_TIMEOUT } from "./lib.mjs";
+import { CliError, USAGE, VALID_VM, WAIT_LOST, WAIT_TIMEOUT, wasInterrupted } from "./lib.mjs";
 
-/** How a command reports: `vm` if its first argument names a VM (the message says which); `when` to report
- *  only some invocations (not --bg, not help, not a listing that returns at once).
- *  @typedef {{ vm?: boolean, when?: (args: string[]) => boolean }} StatusSpec */
+/** How a command reports: `vm` if one of its arguments names a VM (true: the first; a number: that one), and the
+ *  message says which; `when` to report only some invocations (not --bg, not a wait that can't wait).
+ *  @typedef {{ vm?: boolean | number, when?: (args: string[]) => boolean }} StatusSpec */
 
 /** @param {NodeJS.ProcessEnv} [env] @param {{ isTTY?: boolean }} [stream] */
 export function statusEnabled(env = process.env, stream = process.stderr) {
 	switch (env.BOXERY_STATUS ?? "auto") {
-		case "0": case "off": case "false": return false;
+		case "": case "auto": return !!stream.isTTY && (env.TERM ?? "dumb") !== "dumb";
 		case "1": case "on": case "true": return true;
+		default: return false; // 0, off, false, and anything else that isn't a yes: a typo shouldn't turn it on
 	}
-	return !!stream.isTTY && (env.TERM ?? "dumb") !== "dumb";
 }
 
-/** One report. Each report replaces the whole record, so every one repeats app.
- *  @param {"working" | "done" | "error" | "idle"} state @param {string} [text] */
-export function emit(state, text = "") {
+/** One report. Each report replaces the whole record, so every one repeats app. kind: what a blocked
+ *  command waits for. @param {"working" | "blocked" | "done" | "error" | "idle"} state @param {string} [text] @param {"permission" | "question" | "auth"} [kind] */
+export function emit(state, text = "", kind) {
 	// (Control characters would make the terminal discard the whole report; ours has none, but the text is data.)
 	const clean = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
 	const msg = clean ? `:msg=${Buffer.from(clean).toString("base64")}` : "";
-	process.stderr.write(`\x1b]7501;state=${state}:app=boxery${msg}\x1b\\`);
+	process.stderr.write(`\x1b]7501;state=${state}${kind && state === "blocked" ? `:kind=${kind}` : ""}:app=boxery${msg}\x1b\\`);
 }
 
 /** How a command ended: the state to report and what to say. 124 and 125 mean something only for wait; for
@@ -37,12 +37,31 @@ export function emit(state, text = "") {
 export function outcome(cmd, code) {
 	if (code === 0) return { state: "done", word: "done" };
 	if (code === 128 + constants.signals.SIGINT || code === 128 + constants.signals.SIGTERM) return { state: "idle", word: "stopped" }; // the user's doing, not a failure
-	if (cmd === "wait" && code === WAIT_TIMEOUT) return { state: "idle", word: "timed out (the job is still running)" };
+	// done, not idle: the wait is over and the person should look (a terminal may drop idle records, and a timeout is no interrupt)
+	if (cmd === "wait" && code === WAIT_TIMEOUT) return { state: "done", word: "timed out (the job is still running)" };
 	if (cmd === "wait" && code === WAIT_LOST) return { state: "error", word: "lost the job" };
 	return { state: "error", word: `failed (exit ${code})` };
 }
 
 const SIGNALS = /** @type {const} */ (["SIGINT", "SIGTERM"]);
+
+/** The command being reported, so that code waiting for a person can say so (blockedOnPerson). @type {{ label: string, pause: (kind: "permission" | "question" | "auth") => void, resume: () => void } | null} */
+let active = null;
+
+/**
+ * Run FN, which waits for the person at this terminal (a prompt that blocks reading the keyboard): the report
+ * is `blocked` meanwhile, not `working`, and Ctrl-C is the terminal's again. Our signal handler is off for
+ * the wait: a blocking read can't run it until the read returns, and it would keep Ctrl-C from ending the
+ * command at the prompt. (Then the process dies unreported; a terminal drops a blocked record when it exits.)
+ * Outside a reported command it just runs FN.
+ * @template T @param {"permission" | "question" | "auth"} kind @param {() => T} fn @returns {T}
+ */
+export function blockedOnPerson(kind, fn) {
+	const a = active;
+	if (!a) return fn();
+	a.pause(kind);
+	try { return fn(); } finally { a.resume(); }
+}
 
 /**
  * Run FN, reporting `working` first and how it ended after. SPEC is the command's `status`; with none, or when
@@ -51,27 +70,31 @@ const SIGNALS = /** @type {const} */ (["SIGINT", "SIGTERM"]);
  * A signal that ends the process without reaching a handler (Node waiting on the host, no child holding the
  * terminal) is reported as stopped before the process dies of it. When a child shares the terminal, lib.mjs
  * inherit() has its own handlers and the child's end comes back here as an error, stopped if it was interrupted.
+ * A usage error (a mistake in the command line, nothing ran) is reported as idle, not as a failure.
  * @template T
  * @param {string} cmd @param {StatusSpec | undefined} spec @param {string[]} args @param {() => Promise<T>} fn @returns {Promise<T>}
  */
 export async function reporting(cmd, spec, args, fn) {
 	if (!spec || spec.when?.(args) === false || !statusEnabled()) return fn();
-	const vm = spec.vm && VALID_VM.test(args[0] ?? "") ? args[0] : "";
+	const vm = spec.vm !== undefined && spec.vm !== false && VALID_VM.test(args[spec.vm === true ? 0 : spec.vm] ?? "") ? args[spec.vm === true ? 0 : spec.vm] : "";
 	const label = vm ? `${vm}: ${cmd}` : cmd;
 	let ended = false;
-	const finish = (/** @type {number} */ code) => {
+	const end = (/** @type {"done" | "error" | "idle"} */ state, /** @type {string} */ word) => {
 		if (ended) return;
 		ended = true;
-		const { state, word } = outcome(cmd, code);
 		emit(state, `${label} ${word}`);
 	};
+	const finish = (/** @type {number} */ code) => { const { state, word } = outcome(cmd, code); end(state, word); };
 	const onSignal = (/** @type {NodeJS.Signals} */ sig) => {
 		if (process.listenerCount(sig) > 1) return; // someone else owns it (a child holds the terminal): its exit reports
 		finish(128 + constants.signals[sig]);
 		process.off(sig, onSignal);
 		process.kill(process.pid, sig); // now with the default action: the process ends by the signal, as it would have
 	};
-	for (const sig of SIGNALS) process.on(sig, onSignal);
+	const listen = () => { for (const sig of SIGNALS) process.on(sig, onSignal); };
+	const unlisten = () => { for (const sig of SIGNALS) process.off(sig, onSignal); };
+	active = { label, pause: (kind) => { unlisten(); emit("blocked", `${label} is waiting for your approval`, kind); }, resume: () => { listen(); emit("working", label); } };
+	listen();
 	emit("working", label);
 	try {
 		const r = await fn();
@@ -79,10 +102,12 @@ export async function reporting(cmd, spec, args, fn) {
 		return r;
 	} catch (e) {
 		const code = e instanceof CliError ? e.exitCode : 1;
+		if (e instanceof CliError && code === USAGE && e.message) end("idle", "not run: usage error");
 		// (ssh exits 255 after Ctrl-C, so a signal that arrived while a child ran decides, not its exit code)
-		finish(code !== 0 && interrupted() ? 128 + constants.signals.SIGINT : code);
+		else finish(code !== 0 && wasInterrupted() ? 128 + constants.signals.SIGINT : code);
 		throw e;
 	} finally {
-		for (const sig of SIGNALS) process.off(sig, onSignal);
+		unlisten();
+		active = null;
 	}
 }

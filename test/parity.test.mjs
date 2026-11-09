@@ -133,7 +133,7 @@ const INTERACTIVE = "interactive or a tunnel that runs until Ctrl-C: the program
 const BEFORE_HOST = "handled before a host is selected, outside the seam";
 const NO_STATUS = {
 	rm: QUICK, pin: QUICK, shapes: QUICK, ls: QUICK, snaps: QUICK, "snap-rm": QUICK, images: QUICK, sessions: QUICK, jobs: QUICK, kill: QUICK,
-	grant: QUICK, revoke: QUICK, grants: QUICK, "agent-forward": QUICK, renew: QUICK, release: QUICK, leases: QUICK, pool: QUICK, version: QUICK,
+	grant: QUICK, revoke: QUICK, grants: QUICK, "agent-forward": QUICK, renew: QUICK, release: QUICK, leases: QUICK, version: QUICK,
 	backends: QUICK, capabilities: QUICK, backend: QUICK, "proxy-log": QUICK,
 	prompt: "starts a detached task and returns; the task isn't this process",
 	ssh: INTERACTIVE, attach: INTERACTIVE, forward: INTERACTIVE, desktop: INTERACTIVE,

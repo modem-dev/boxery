@@ -455,16 +455,17 @@ PY
 }
 cat >"$tmp/ptyrun.py" <<'PY'
 import os, pty, select, signal, sys, time
-# pty.py [--int-after SECS] CMD ARG...: run CMD on a pty, print what it wrote, then rc=N
-args = sys.argv[1:]; int_after = None
-if args[0] == "--int-after": int_after = float(args[1]); args = args[2:]
+# ptyrun.py [--int-on TEXT] CMD ARG...: run CMD on a pty, print what it wrote, then rc=N. --int-on: press Ctrl-C
+# once TEXT has appeared in its output (not after a guessed delay: a slow machine would send it too early).
+args = sys.argv[1:]; int_on = None
+if args[0] == "--int-on": int_on = args[1].encode(); args = args[2:]
 pid, fd = pty.fork()
 if pid == 0:
     signal.signal(signal.SIGINT, signal.SIG_DFL)   # a test run in the background starts with SIGINT ignored, which a trap can't undo
     os.execvp(args[0], args)
-out = b""; t0 = time.time(); sent = False
-while True:
-    if int_after is not None and not sent and time.time() - t0 > int_after:
+out = b""; seen = None; sent = False; end = time.time() + 60
+while time.time() < end:
+    if int_on is not None and not sent and seen is not None and time.time() - seen > 0.5:
         os.killpg(os.getpgid(pid), signal.SIGINT); sent = True   # what Ctrl-C does: the whole foreground group
     r, _, _ = select.select([fd], [], [], 0.1)
     if r:
@@ -472,6 +473,7 @@ while True:
         except OSError: break
         if not d: break
         out += d
+        if int_on is not None and seen is None and int_on in out: seen = time.time()
 status = os.waitpid(pid, 0)[1]
 sys.stdout.buffer.write(out)
 print("\nrc=%d" % (os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status)))
@@ -500,7 +502,7 @@ if command -v python3 >/dev/null 2>&1; then
 		ok "status: on by itself when stderr is a terminal" || bad "status on a pty: $(reports "$tmp/pty.out") $(tail -1 "$tmp/pty.out")"
 	TERM=dumb python3 "$tmp/ptyrun.py" "$A" run st1 true >"$tmp/pty.out" 2>&1
 	[ -z "$(reports "$tmp/pty.out")" ] && ok "status: silent on TERM=dumb" || bad "status, TERM=dumb: $(reports "$tmp/pty.out")"
-	TERM=xterm python3 "$tmp/ptyrun.py" --int-after 1.5 "$A" run st1 sleep 30 >"$tmp/pty.out" 2>&1
+	TERM=xterm python3 "$tmp/ptyrun.py" --int-on 'state=working' "$A" run st1 sleep 30 >"$tmp/pty.out" 2>&1
 	[ "$(reports "$tmp/pty.out")" = "$(printf 'working boxery st1: run\nidle boxery st1: run stopped')" ] && ! grep -q '^rc=0$' "$tmp/pty.out" &&
 		ok "status: Ctrl-C reports idle (not an error) and the command still fails" || bad "status, Ctrl-C: $(reports "$tmp/pty.out") $(tail -1 "$tmp/pty.out")"
 else

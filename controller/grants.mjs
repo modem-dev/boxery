@@ -9,6 +9,7 @@ import { parseGrantArgs } from "../core/grant-approval.mjs";
 import { addGrants, applyGrants, grantCommand, grantPrompt, listGrants, revokeGrants, storedSpecs } from "../core/grants.mjs";
 import { reapplyPushed } from "../core/grant-operations.mjs";
 import { CliError, VALID_VM, die, needHost, needVm, note, say, usage, warn } from "./lib.mjs";
+import { blockedOnPerson } from "./status.mjs";
 /** @import { GrantSpec } from "../core/boxery-core.mjs" */
 /** @import { Selected } from "./lib.mjs" */
 
@@ -43,16 +44,19 @@ function ask(s, vm, specs) {
 	try { tty = openSync("/dev/tty", "r+"); }
 	catch { die(`grants need a person. Ask the user to run the command below, or use vm_grant:\n${specs.map((g) => grantCommand("grant", vm, s.host.name, g)).join("\n")}`); }
 	let answer = "";
-	try {
-		writeSync(tty, `${prompt}\n\nAllow access? [y/N] `);
-		const buf = Buffer.alloc(1);
-		for (;;) {
-			let n = 0;
-			try { n = readSync(tty, buf, 0, 1, null); } catch { break; }
-			if (n === 0 || buf[0] === 0x0a) break;
-			answer += String.fromCharCode(buf[0]);
-		}
-	} finally { closeSync(tty); }
+	// Blocked on the person: the terminal's status says so, and Ctrl-C ends the command here (controller/status.mjs).
+	blockedOnPerson("permission", () => {
+		try {
+			writeSync(tty, `${prompt}\n\nAllow access? [y/N] `);
+			const buf = Buffer.alloc(1);
+			for (;;) {
+				let n = 0;
+				try { n = readSync(tty, buf, 0, 1, null); } catch { break; }
+				if (n === 0 || buf[0] === 0x0a) break;
+				answer += String.fromCharCode(buf[0]);
+			}
+		} finally { closeSync(tty); }
+	});
 	if (!["y", "Y", "yes", "YES"].includes(answer.replace(/\r$/, ""))) die("grant declined; nothing was granted");
 }
 
