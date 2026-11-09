@@ -51,6 +51,8 @@ Controller-owned follow-up commands use `hint(COMMAND, ARGS, {host})` from `cont
 
 `test/cli-contracts.test.mjs` checks contracts and their inheritance, scope routing, help boundaries, optional hosts and SSH-qualified targets against an unconfigured temporary home.
 
+`test/cli-boundaries.test.mjs` derives leaf routes from those contracts, including aliases and family actions, and checks actual payload, terminal/approval, selector, hint and query behavior. A new payload/terminal policy or alias target must have a valid fixture vector; missing coverage fails explicitly. `test/fixtures/cli-sandbox.mjs` isolates HOME and BOXERY_HOME, clears SSH_AUTH_SOCK and stubs transports. Do not run broad CLI input matrices with a real HOME or unstubbed SSH: even negative setup/host-add cases can attempt a connection.
+
 `test/cli-families.test.mjs` runs the real CLI against a stub `boxery-host` and a stub `ssh` in temporary profiles, and checks that every family action and its older spelling produce the same output, exit status, ssh and host calls and saved state; that help and mistakes touch no host, profile or grant; that `host`'s registry actions refuse `--host` while its maintenance actions follow it; that `access ls` is read-only; and that grant approval, grant stores and leases stay per profile. Add a pair there when you add an action.
 
 `test/frontends.test.mjs` does the same for the two agent front-ends, the MCP server and the pi extension: both must list exactly the shared tool table in `core/boxery-tools.mjs`. Put a new tool or action in the table (with its `run`), not in one front-end; something only one of them can offer goes in that test's `MCP_ONLY` or `PI_ONLY` with the reason.
