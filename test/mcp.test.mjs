@@ -2,7 +2,7 @@
 // (in a temp "VM home"), and a stub boxery-host answers controller operations.
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -848,6 +848,43 @@ describe("http", () => {
 		}
 	});
 
+	test("--token-file is read again when it changes: rotating it revokes the old token without a restart", async () => {
+		const tdir = mkdtempSync(path.join(tmpdir(), "boxery-mcp-token-"));
+		const file = path.join(tdir, "token");
+		// Rotate the way an operator would: write a new file and rename it into place.
+		const rotate = (/** @type {string} */ value) => {
+			writeFileSync(`${file}.new`, value, { mode: 0o600 });
+			renameSync(`${file}.new`, file);
+		};
+		rotate("first-token\n");
+		const tport = 20000 + Math.floor(Math.random() * 20000);
+		const q = spawn(process.execPath, [SERVER, "--http", `127.0.0.1:${tport}`, "--vm", "fakevm", "--token-file", file], { env: { ...env, BOXERY_MCP_TOKEN: "" }, stdio: "ignore" });
+		const status = async (/** @type {string} */ t) =>
+			(await fetch(`http://127.0.0.1:${tport}/mcp`, { method: "POST", headers: { ...H, authorization: `Bearer ${t}` }, body: JSON.stringify(init) })).status;
+		try {
+			let up = false;
+			for (let i = 0; i < 50 && !up; i++) {
+				up = await fetch(`http://127.0.0.1:${tport}/healthz`).then((r) => r.ok, () => false);
+				if (!up) await new Promise((r) => setTimeout(r, 100));
+			}
+			assert.ok(up, "http server did not start");
+			assert.equal(await status("first-token"), 200);
+			rotate("second-token\n");
+			assert.equal(await status("first-token"), 401, "the old token stops working at once");
+			assert.equal(await status("second-token"), 200, "the new token works without a restart");
+			rmSync(file);
+			assert.equal(await status("second-token"), 401, "a missing token file refuses everything");
+			assert.equal(await status("undefined"), 401, "including a guess at an unset token");
+			writeFileSync(file, "\n");
+			assert.equal(await status("second-token"), 401, "so does an empty one");
+		} finally {
+			q.kill();
+			rmSync(tdir, { recursive: true, force: true });
+		}
+		const missing = spawn(process.execPath, [SERVER, "--http", "127.0.0.1:1", "--token-file", path.join(tdir, "nope")], { env: { ...env, BOXERY_MCP_TOKEN: "" }, stdio: "ignore" });
+		assert.equal(await new Promise((r) => missing.on("exit", r)), 2, "refuses to start without a readable token file");
+	});
+
 	test("auth: token required, Tailscale user allowlist, Origin check", async () => {
 		assert.equal((await post(init)).status, 401);
 		for (const bad of ["Bearer nope", "Bearer t0ke", `Bearer ${token}x`, `Bearer ${token}${"x".repeat(4096)}`, token, `bearer ${token}`, "Bearer "]) {
@@ -965,6 +1002,128 @@ describe("http", () => {
 		const noSse = await post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "vm_bash", arguments: { command: "echo x" }, _meta: { progressToken: "q" } } }, { ...auth, "mcp-session-id": sid, accept: "application/json" });
 		assert.match(/** @type {string} */ (noSse.headers.get("content-type")), /application\/json/);
 		assert.match((await noSse.json()).result.content[0].text, /x/);
+	});
+});
+
+// Scoped tokens (#3, docs/mcp.md#scoped-tokens): a server with no unscoped token. Each refusal must happen
+// before anything reaches the host (the stub's host.calls) or the VM (a marker file in the fake VM).
+describe("http scoped tokens", () => {
+	let p, port, store;
+	const H = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+	const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } };
+	const post = (body, headers = {}) => fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", headers: { ...H, ...headers }, body: JSON.stringify(body) });
+	/** A session for SECRET: { sid, call(tool, args) → result, list() → tool names, instructions }. */
+	const open = async (/** @type {string} */ secret) => {
+		const auth = { authorization: `Bearer ${secret}` };
+		const r = await post(init, auth);
+		assert.equal(r.status, 200, "initialize");
+		const sid = /** @type {string} */ (r.headers.get("mcp-session-id"));
+		const { result } = await r.json();
+		let id = 10;
+		const call = async (/** @type {string} */ name, /** @type {object} */ args) => (await (await post({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name, arguments: args } }, { ...auth, "mcp-session-id": sid })).json()).result;
+		const list = async () => (await (await post({ jsonrpc: "2.0", id: ++id, method: "tools/list" }, { ...auth, "mcp-session-id": sid })).json()).result.tools.map((/** @type {{ name: string }} */ t) => t.name);
+		return { sid, call, list, instructions: /** @type {string} */ (result.instructions), auth };
+	};
+	const refused = (/** @type {any} */ r, /** @type {RegExp} */ what) => {
+		assert.equal(r.isError, true, JSON.stringify(r));
+		assert.match(r.content[0].text, what);
+		assert.match(r.content[0].text, /outside this token's scope \(token '[a-z-]+'\); ask the user for a token that covers it/);
+	};
+	let mcpTokens, catalog;
+
+	before(async () => {
+		mcpTokens = await import("../core/mcp-tokens.mjs");
+		catalog = (await import("../core/boxery-tools.mjs")).toolCatalog();
+		store = path.join(dir, "home/mcp-tokens.json");
+		registerHost(path.join(dir, "home"), "other", path.join(dir, "home")); // a second name for a host in no token's scope
+		port = 20000 + Math.floor(Math.random() * 20000);
+		p = spawn(process.execPath, [SERVER, "--http", `127.0.0.1:${port}`], { env: { ...env, BOXERY_MCP_TOKEN: "" }, stdio: "ignore" });
+		// Starts with scoped tokens alone: the store needs one before the server looks.
+		mcpTokens.createToken("boot", { tools: { vm_info: true }, hosts: null, vms: [], admin: false }, {}, store);
+		for (let i = 0; i < 50; i++) {
+			try { if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return; } catch {}
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		throw new Error("http server did not start with scoped tokens only");
+	});
+	after(() => { p?.kill(); rmSync(path.join(dir, "home/host-registry/other"), { force: true }); rmSync(store, { force: true }); });
+	const mint = (/** @type {string} */ label, /** @type {object} */ s = {}, /** @type {object} */ opts = {}) =>
+		mcpTokens.createToken(label, { tools: mcpTokens.toolsScope(catalog), hosts: null, vms: [], admin: false, ...s }, opts, store).secret;
+
+	test("a token for its own VMs: every way of naming another VM is refused before it reaches the host or the VM", async () => {
+		const c = await open(mint("own"));
+		assert.match(c.instructions, /token 'own', which allows only: .*VMs: the VMs created with this token; hosts: local/);
+		const marker = path.join(env.VMROOT, "pwned-by-scope");
+		const before = hostArgs(dir).length;
+		refused(await c.call("vm_bash", { vm: "fakevm", command: "touch ~/pwned-by-scope" }), /VM 'fakevm' on host local/);
+		refused(await c.call("vm_manage", { action: "use", vm: "fakevm" }), /VM 'fakevm'/);
+		refused(await c.call("vm_read", { vm: "fakevm", path: "/etc/hostname" }), /fakevm/);
+		refused(await c.call("vm_jobs", { vm: "fakevm", action: "list" }), /fakevm/);
+		refused(await c.call("vm_grant", { vm: "fakevm", spec: "llm:openai", reason: "x" }), /fakevm/);
+		refused(await c.call("vm_copy", { from: "fakevm:/etc/hostname", to: "mine-x:/tmp/x" }), /fakevm/);
+		refused(await c.call("vm_copy", { from: "local/fakevm:/etc/hostname", to: "fakevm:/tmp/y" }), /fakevm/);
+		for (const a of [{ action: "rm", vm: "fakevm" }, { action: "snap", vm: "fakevm" }, { action: "revert", vm: "fakevm", snapshot: "s1" }, { action: "stop", vm: "fakevm" },
+			{ action: "fork", vm: "fakevm", to: ["mine-copy"] }, { action: "new", vm: "mine-img", from: "fakevm@s1" }]) refused(await c.call("vm_manage", a), /fakevm/);
+		refused(await c.call("vm_manage", { action: "build-base" }), /vm_manage build-base/);
+		refused(await c.call("vm_lease", { action: "acquire" }), /vm_lease acquire/);
+		refused(await c.call("vm_manage", { action: "host", host: "other" }), /host other/);
+		refused(await c.call("vm_info", { action: "list", host: "other" }), /host other/);
+		refused(await c.call("vm_manage", { action: "host_rm", name: "other" }), /vm_manage host_rm/);
+		assert.equal(existsSync(marker), false, "nothing ran in the VM");
+		const reached = hostArgs(dir).slice(before);
+		for (const c2 of reached) assert.match(c2, /^(ls --json|known-hosts .*)$/, `only listings reached the host, not: ${c2}`);
+		assert.equal((await c.call("vm_info", { action: "list" })).structuredContent.vms.length, 0, "list shows only what the token reaches");
+		assert.equal((await c.call("vm_info", { action: "images" })).structuredContent.images.length, 0);
+		assert.deepEqual((await c.call("vm_info", { action: "hosts" })).structuredContent.hosts.map((/** @type {{ name: string }} */ h) => h.name), ["local"]);
+	});
+
+	test("a VM the token creates is its own (bound to its host key); a VM reusing the name later isn't", async () => {
+		const c = await open(mint("maker"));
+		const made = await c.call("vm_manage", { action: "new", vm: "mine" });
+		assert.equal(made.isError, false, JSON.stringify(made));
+		assert.ok(hostArgs(dir).includes("new mine"));
+		const rec = mcpTokens.readStore(store).find((e) => e.label === "maker");
+		assert.deepEqual(rec.owned.map((o) => [o.host, o.vm, typeof o.key]), [["local", "mine", "string"]], "recorded with its host key");
+		assert.equal((await c.call("vm_manage", { action: "stop", vm: "mine" })).isError, false);
+		assert.deepEqual((await c.call("vm_info", { action: "list" })).structuredContent.vms.map((v) => v.name), [], "(the stub host lists only fakevm)");
+		// The VM is removed and someone else makes one named "mine": its host key differs.
+		mcpTokens.editStore((entries) => { entries.find((e) => e.label === "maker").owned[0].key = "0".repeat(64); }, store);
+		await new Promise((r) => setTimeout(r, 10_100)); // past the key cache
+		refused(await c.call("vm_manage", { action: "stop", vm: "mine" }), /VM 'mine'/);
+		// rm through the token forgets it.
+		mcpTokens.editStore((entries) => { entries.find((e) => e.label === "maker").owned[0].key = null; }, store);
+		assert.equal((await c.call("vm_manage", { action: "rm", vm: "mine" })).isError, false);
+		assert.deepEqual(mcpTokens.readStore(store).find((e) => e.label === "maker").owned, []);
+	});
+
+	test("--vm patterns, --read-only and --tools: the tool list shows only what the token may use", async () => {
+		const w = await open(mint("worker", { vms: ["fake*"] }));
+		assert.match((await w.call("vm_bash", { vm: "fakevm", command: "echo in-scope" })).content[0].text, /in-scope/);
+		const ro = await open(mint("viewer", { vms: ["fakevm"], tools: mcpTokens.toolsScope(catalog, { readOnly: true }) }));
+		assert.deepEqual((await ro.list()).sort(), ["vm_info", "vm_read", "vm_screenshot"]);
+		refused(await ro.call("vm_write", { vm: "fakevm", path: "x", content: "y" }), /vm_write/);
+		const narrow = await open(mint("narrow", { vms: ["fakevm"], tools: mcpTokens.toolsScope(catalog, { tools: "vm_manage:snap" }) }));
+		assert.deepEqual(await narrow.list(), ["vm_manage"]);
+		refused(await narrow.call("vm_manage", { action: "rm", vm: "fakevm" }), /vm_manage rm/);
+		assert.equal((await narrow.call("vm_manage", { action: "snap", vm: "fakevm" })).isError, false);
+	});
+
+	test("sessions belong to the token that opened them; rm and expiry refuse from the next request", async () => {
+		const a = await open(mint("alice", { vms: ["fakevm"] }));
+		const bSecret = mint("bob", { vms: ["fakevm"] });
+		const asBob = { authorization: `Bearer ${bSecret}`, "mcp-session-id": a.sid };
+		assert.equal((await post({ jsonrpc: "2.0", id: 2, method: "tools/list" }, asBob)).status, 404, "another token can't use the session");
+		assert.equal((await fetch(`http://127.0.0.1:${port}/mcp`, { method: "DELETE", headers: asBob })).status, 204);
+		assert.equal((await a.list()).length > 0, true, "nor end it");
+		mcpTokens.removeToken("alice", store);
+		const r = await post({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { ...a.auth, "mcp-session-id": a.sid });
+		assert.equal(r.status, 401);
+		assert.equal(r.headers.get("www-authenticate"), 'Bearer error="invalid_token"');
+		const old = mint("old", {}, { ttl: 60, now: 1000 });
+		const e = await post(init, { authorization: `Bearer ${old}` });
+		assert.equal(e.status, 401);
+		assert.match((await e.json()).error, /token 'old' expired; ask the user for a new one/);
+		assert.equal((await post(init)).headers.get("www-authenticate"), "Bearer", "no credentials: a plain challenge");
 	});
 });
 

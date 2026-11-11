@@ -59,6 +59,7 @@ const CLI_ONLY = {
 	runners: "host admin: GitHub Actions runners on the pool, with a GitHub token that stays on the host",
 	pin: "which ssh host key a VM is trusted with is the user's decision (--from-guest trusts the network once)",
 	patch: "rewrites a VM's software and may restart it under running agents; the user's to run (vm_info list shows outdated VMs)",
+	"mcp-token": "minting MCP access is the user's decision; an agent never mints or widens its own token",
 };
 
 // controller/cli.mjs's command table: every command, including those handled before a host is selected
@@ -139,7 +140,7 @@ const NO_STATUS = {
 	prompt: "starts a background job and returns; the job isn't this process",
 	ssh: INTERACTIVE, attach: INTERACTIVE, forward: INTERACTIVE, desktop: INTERACTIVE,
 	host: FAMILY, snapshot: FAMILY, agent: FAMILY, job: FAMILY, access: FAMILY, lease: FAMILY,
-	setup: BEFORE_HOST, help: BEFORE_HOST,
+	setup: BEFORE_HOST, help: BEFORE_HOST, "mcp-token": BEFORE_HOST,
 };
 
 test("every CLI command declares a terminal status, or says why it has none", () => {

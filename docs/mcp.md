@@ -79,6 +79,29 @@ With `--copy-root DIR`, `local:` paths are confined to `DIR`:
 
 The `initialize` instructions and the `vm_copy` and `vm_sync` descriptions tell the agent which of the two applies. stdio mode is unchanged: there `local:` is your own machine. `--copy-root` confines it there too, if you want that.
 
+### Scoped tokens
+
+`BOXERY_MCP_TOKEN` (or `--token-file`) is one unscoped token: whoever holds it can use every tool on every VM and host the server reaches, and the server logs a warning when it has one. To give a client less, mint a scoped token on the machine running the server, and give it that instead:
+
+```bash
+boxery mcp-token new ci-agent --ttl 7d                       # its own VMs only, on the server's --host
+boxery mcp-token new viewer --vm 'demo-*' --read-only        # look at the demo VMs, change nothing
+boxery mcp-token new ops --host hornet --tools vm_bash,vm_info --vm 'web-*'
+boxery mcp-token ls
+boxery mcp-token rm viewer                                   # refused from its next request
+```
+
+The server starts with scoped tokens alone (no `BOXERY_MCP_TOKEN` needed), and accepts both kinds when it has both. A scoped token reaches:
+
+- **Tools:** all of them by default, or `--tools vm_bash,vm_manage:new,…` (a tool, or one action of it), or `--read-only` (`vm_read`, `vm_screenshot`, `vm_info`). The client's tool list shows only these, and the `initialize` instructions say what the token allows.
+- **Hosts:** the server's `--host` by default, or each `--host NAME`.
+- **VMs:** those matching a `--vm` pattern (`*` matches any characters: any VM of that name, whoever made it), and those it created itself (`new`, `fork`, `use` of a missing VM). A created VM is recorded with its ssh host key: if it is removed and someone else makes a VM of the same name, that one isn't the token's. On backends that manage host keys themselves (boat, OpenShell), the name alone identifies it, and `mcp-token ls` says so.
+- **Admin work** only with `--admin`: `build-base`, `host_add`, `host_rm`, pool leases (`vm_lease`), and any other host-wide command.
+
+Anything else is refused with a message that names the token and tells the agent to ask the user; it reads the same whether or not the VM exists. The check runs where boxery acts (every ssh to a VM and every host command), not only when a tool starts, so no way of naming a VM (`HOST/VM:path`, `VM@SNAP`, fork targets, generated names) gets around it. `vm_info list`, `images` and `hosts` show only what the token reaches; other output (a name that's taken, an error from the host) can still reveal that a VM exists, but not let the token use it.
+
+Tokens are stored hashed in `~/.boxery/mcp-tokens.json` (mode 0600), which `vm_copy` and `vm_grant` refuse to read. They expire after `--ttl` (default 30 days; `never` for none). A session belongs to the token, and tailnet user, that opened it: another can't use or end it. `rm`, expiry and changes to the token file take effect at the next request, without a restart.
+
 ## Protocol features
 
 The server speaks MCP `2024-11-05` through `2025-11-25` and sends newer fields only to clients that negotiated them, so older clients see the same responses as before.
@@ -178,7 +201,7 @@ commit outcome**, not rollback: reread before retrying.
 | `--host NAME` | Registered startup host (otherwise the controller default). Each HTTP session keeps its own host and VM. |
 | `--vm NAME` | Default VM. Without it, the model picks one with `vm_manage {action:"use"}`, and tools fail closed when no `vm` is given. |
 | `--http ADDR:PORT` | Serve Streamable HTTP at `/mcp` instead of stdio. Each MCP session keeps its own current VM. |
-| `--token-file PATH` | Bearer token from a file instead of `$BOXERY_MCP_TOKEN` |
+| `--token-file PATH` | The unscoped bearer token from a file instead of `$BOXERY_MCP_TOKEN` (or neither: [scoped tokens](#scoped-tokens) only). The file is read again when it changes, so writing a new token there revokes the old one at the next request, without a restart. While the file is missing or empty, every request is refused. |
 | `--copy-root DIR` | Allow `vm_copy` `local:` paths and `vm_sync` checkouts, confined to `DIR` (see [B](#b-streamable-http-on-the-host-over-tailscale)). Over HTTP, both are refused without it. |
 | `--allow-user LOGIN` | Also require this `Tailscale-User-Login` header (set by `tailscale serve`). Loopback binds only. Can be repeated. |
 | `--allow-origin ORIGIN` | Accept requests with this `Origin`. Foreign origins are rejected by default. |

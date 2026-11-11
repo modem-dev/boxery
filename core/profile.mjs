@@ -8,6 +8,7 @@ import os, { homedir } from "node:os";
 import path from "node:path";
 import { BOXERY_HOME, currentHost, defaultHost } from "./boxery-core.mjs";
 import { writeAtomic } from "./fsutil.mjs";
+import { afterHostCommand, authorizeHostCommand } from "./mcp-auth.mjs";
 import { DEFAULT_HOST_BIN, checkTarget, localHostBin, parseConfig, remoteCommand, renderSshConfig } from "./ssh-config.mjs";
 /** @import { HostProfile } from "./boxery-core.mjs" */
 /** @import { Target } from "./ssh-config.mjs" */
@@ -104,9 +105,11 @@ export function hostCommand(host, c, args) {
  * @param {string[]} args @param {HostRunOpts} [opts] @returns {Promise<string>}
  */
 export async function hostRun(args, { input, signal, host = currentHost(), timeout = 120_000, stdin = "pipe", stdout = "pipe", stderr = "pipe", raw = false, config, onData } = {}) {
+	// Scoped MCP tokens (core/mcp-auth.mjs): every host command is checked here, where it is finally sent.
+	await authorizeHostCommand(host, args);
 	const c = config ?? await profileConfig(host, { signal });
 	const [cmd, argv] = hostCommand(host, c, args);
-	return new Promise((resolve, reject) => {
+	const result = await new Promise((/** @type {(out: string) => void} */ resolve, reject) => {
 		const child = spawn(cmd, argv, { stdio: [stdin, stdout, stderr], signal, env: c.env });
 		running.add(child); child.once("close", () => running.delete(child)); child.once("error", () => running.delete(child));
 		// Our own timer, not spawn's: that one is never cleared when the command can't start (ENOENT), and
@@ -147,6 +150,9 @@ export async function hostRun(args, { input, signal, host = currentHost(), timeo
 		child.stdin?.on("error", () => {}); // EPIPE if the command exits before reading
 		child.stdin?.end(input);
 	});
+	// (The command succeeded either way: a VM whose ownership couldn't be recorded is just not the token's.)
+	await afterHostCommand(host, args).catch(() => {});
+	return result;
 }
 
 /** Does the host support something its `help` shows (PATTERN)? Remembered in the profile as MARKER once it

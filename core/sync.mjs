@@ -10,6 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { q } from "./shell.mjs";
 import { PROJECT, assertName, confineLocal, currentHost, deniedDirs, isWithin, sshRun, vmPath } from "./boxery-core.mjs";
+import { authorizeVm } from "./mcp-auth.mjs";
 /** @import { LocalConfinement, ToolResult } from "./boxery-core.mjs" */
 /** @typedef {{ from?: string, to?: string }} SyncParams */
 /** @typedef {{ localCwd?: string, local?: LocalConfinement | false, signal?: AbortSignal }} SyncOpts */
@@ -329,6 +330,7 @@ export async function syncTool(vm, { from, to } = {}, { localCwd = process.cwd()
 			const created = probe.state !== "repo";
 			if (created) await guest(vm, { MODE: "init", DIR: dest, FORMAT: s.format });
 			try {
+				await authorizeVm(host, vm); // git's own ssh carries no context: scoped MCP tokens (core/mcp-auth.mjs)
 				objects = (await push(bare, vm, host.sshConf, dest, ref, signal)) ?? 0;
 			} catch (e) {
 				if (created) await guest(vm, { MODE: "uninit", DIR: dest }).catch(() => {});

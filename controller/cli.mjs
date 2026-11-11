@@ -391,6 +391,21 @@ export const COMMANDS = {
 			capabilities: { command: "capabilities" },
 		},
 	},
+	"mcp-token": {
+		contract: { scope: "controller", noHost: "mcp-token takes --host NAME after new LABEL, to scope a token to that host" },
+		local: async (args) => (await import("./mcp-tokens.mjs")).mcpTokenCommand(args),
+		help: {
+			group: "more", summary: "scoped tokens for the HTTP MCP server (boxery-mcp --http)", list: "mcp-token new|ls|rm",
+			usage: ["mcp-token new LABEL [--vm PATTERN]... [--host NAME]... [--tools TOOL[:ACTION],... | --read-only] [--admin] [--ttl 30d|12h|never]", "mcp-token ls [--json]", "mcp-token rm LABEL"],
+			details: [
+				"A token reaches only its tools, its hosts (default: the server's --host) and its VMs: those matching --vm (* matches any characters) and those created with it. Admin work (build-base, adding hosts, pool leases) needs --admin.",
+				"new prints the token once; the server stores only its hash, in ~/.boxery/mcp-tokens.json. rm and expiry take effect at the next request, without a restart.",
+			],
+			flags: [["--vm PATTERN", "VMs the token may use besides the ones it creates (repeatable; * matches any characters)"], ["--host NAME", "A registered host it may use (repeatable; default: the server's --host)"], ["--tools LIST", "Only these tools, or TOOL:ACTION (e.g. vm_bash,vm_manage:new)"], ["--read-only", "Only vm_read, vm_screenshot and vm_info"], ["--admin", "Also build-base, host_add, host_rm and pool leases"], ["--ttl T", "Lifetime: 90m, 12h, 30d (default) or never"], JSON_FLAG],
+			examples: [["An agent that may create and use its own VMs, for a week", "boxery mcp-token new ci-agent --ttl 7d"], ["Look at the demo VMs, change nothing", "boxery mcp-token new viewer --vm 'demo-*' --read-only"]],
+			seeAlso: ["setup"], docs: "mcp.md#scoped-tokens",
+		},
+	},
 	"build-base": {
 		help: { group: "legacy", summary: "build the host's desktop base image (one time, ~3 min)", usage: ["build-base"], details: ["Headless VMs (new --headless) don't need it."], docs: "cli.md#lifecycle" },
 		status: {},

@@ -12,17 +12,22 @@
 // "local" (vm_copy) and grant sources are the machine this server runs on. Over HTTP that is the
 // control plane, so vm_copy local: endpoints and vm_sync are refused unless --copy-root confines them.
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import http from "node:http";
 import * as core from "../core/boxery-core.mjs";
 import { HOST_PARAM, runTool, sameHost, TOOLS as SHARED_TOOLS, VM_PARAM } from "../core/boxery-tools.mjs";
+import { UNSCOPED, describeGrant, enforce, toolFilter, withGrant } from "../core/mcp-auth.mjs";
+import { readStore, verifyToken } from "../core/mcp-tokens.mjs";
 /** @import { Lease } from "../core/boxery-core.mjs" */
+/** @import { Grant } from "../core/mcp-auth.mjs" */
 /** @import { JsonSchema, ObjectSchema, Session as ToolSession, Tool, ToolContext } from "../core/boxery-tools.mjs" */
 /** Sends one JSON-RPC message to the client. @typedef {(message: object) => unknown} Notify */
 /**
  * One MCP client session: the shared tool session (current VM, host, leases; core/boxery-tools.mjs) plus protocol state.
  * pending: our requests to the client (elicitation) by id; approve: vm_grant's prompt (see elicitApprover).
- * @typedef {ToolSession & { id: string, inflight: Map<unknown, AbortController>, protocolVersion: string,
+ * grant: what the session may do (core/mcp-auth.mjs); principal: who opened it (token and tailnet user), which
+ * every later request on it must match.
+ * @typedef {ToolSession & { id: string, grant: Grant, principal: string, inflight: Map<unknown, AbortController>, protocolVersion: string,
  *   lastActive: number, pending: Map<string, (msg: any) => void>, requestSeq: number, ui?: boolean, elicit?: boolean,
  *   approve?: (req: { message: string, send: Notify, signal: AbortSignal }) => Promise<string> }} Session
  */
@@ -154,9 +159,10 @@ const TOOL_MAP = new Map([...TOOLS, ...VIEW_TOOLS].map((t) => [t.name, t]));
 
 /** @type {Set<Session>} */
 const allSessions = new Set();
-function newSession() {
+/** @param {Grant} [grant] @param {string} [principal] */
+function newSession(grant = UNSCOPED, principal = "") {
 	const session = /** @type {Session} */ ({
-		id: randomUUID(), host: DEFAULT_HOST, current: DEFAULT_VM, currentHost: DEFAULT_VM ? DEFAULT_HOST : null, inflight: new Map(), protocolVersion: PROTOCOL_VERSIONS.at(-1), lastActive: Date.now(),
+		id: randomUUID(), grant, principal, host: DEFAULT_HOST, current: DEFAULT_VM, currentHost: DEFAULT_VM ? DEFAULT_HOST : null, inflight: new Map(), protocolVersion: PROTOCOL_VERSIONS.at(-1), lastActive: Date.now(),
 		// Session hooks for the shared vm_manage / vm_lease (core/boxery-tools.mjs).
 		adopt(name, host) { session.current = name; session.host = session.currentHost = host; },
 		clear() { session.current = null; session.currentHost = null; },
@@ -175,14 +181,18 @@ function newSession() {
 			if (session.current === l.name && sameHost(session.currentHost, l.host)) session.current = session.currentHost = null;
 		},
 	});
+	// A token's own leases are in its scope while the session holds them.
+	if (grant.kind === "token") session.grant = { ...grant, leased: (h, vm) => !!session.keeper.find(vm) && session.host.name === h };
 	allSessions.add(session);
 	return session;
 }
 
 /** tools/list for this session: title/outputSchema only for clients on 2025-06-18 or later; vm_view only for MCP Apps clients. */
-const listTools = (/** @type {Session} */ session) =>
-	[...TOOLS, ...(session.ui ? VIEW_TOOLS : [])].map(({ run: _r, noVm: _n, title, outputSchema, ...t }) =>
+const listTools = (/** @type {Session} */ session) => {
+	const allowed = withGrant(session.grant, toolFilter);
+	return [...TOOLS, ...(session.ui ? VIEW_TOOLS : [])].filter((t) => allowed(t.name, t.inputSchema.properties.action?.enum ?? null)).map(({ run: _r, noVm: _n, title, outputSchema, ...t }) =>
 		since(session, "2025-06-18") ? { ...t, title, ...(outputSchema ? { outputSchema } : {}) } : t);
+};
 
 /**
  * Progress reporter for one tools/call, or undefined when the client sent no progressToken.
@@ -219,7 +229,7 @@ function progressReporter(token, notify, tool) {
 /** @param {Session} session */
 async function endSession(session) {
 	allSessions.delete(session);
-	await session.keeper.releaseAll();
+	await withGrant(session.grant, () => session.keeper.releaseAll());
 }
 
 /** Before the server exits: sessions' leases go back, and a host registration in progress gives the
@@ -236,7 +246,8 @@ const instructions = (/** @type {Session} */ s) =>
 		host: s.host.name,
 		localToolsNote:
 			"Your other tools (shell, files) act on this machine, not a VM; use them only when you mean to work here.",
-	}) + (LOCAL_COPY_NOTE ? `\nvm_copy: ${LOCAL_COPY_NOTE}` : "") + (LOCAL_SYNC_NOTE ? `\nvm_sync: ${LOCAL_SYNC_NOTE}` : "");
+	}) + (LOCAL_COPY_NOTE ? `\nvm_copy: ${LOCAL_COPY_NOTE}` : "") + (LOCAL_SYNC_NOTE ? `\nvm_sync: ${LOCAL_SYNC_NOTE}` : "") +
+	withGrant(s.grant, () => { const d = describeGrant(); return d ? `\n${d}` : ""; });
 
 /** Send the client a request on this call's channel and resolve with its result. Abort sends notifications/cancelled.
  * @param {Session} session @param {Notify} send @param {string} method @param {object} params @param {AbortSignal} [signal] @returns {Promise<any>} */
@@ -298,7 +309,11 @@ async function callTool(session, params, signal, progress, send) {
  * notify(message) sends a server notification tied to this request (progress), when the transport can.
  * @param {Session} session @param {any} msg @param {Notify} [notify] @returns {Promise<object | null>}
  */
-async function handle(session, msg, notify) {
+function handle(session, msg, notify) {
+	return withGrant(session.grant, () => dispatch(session, msg, notify));
+}
+/** handle()'s body, inside the session's grant. @param {Session} session @param {any} msg @param {Notify} [notify] @returns {Promise<object | null>} */
+async function dispatch(session, msg, notify) {
 	const { id, method, params } = msg ?? {};
 	const isRequest = id !== undefined && id !== null;
 	session.lastActive = Date.now();
@@ -403,15 +418,58 @@ const sha256 = (/** @type {string} */ s) => createHash("sha256").update(s).diges
 /** Constant-time string compare: equal-length digests, so neither the length nor the content leaks through timing. */
 const secretEquals = (/** @type {unknown} */ got, /** @type {unknown} */ want) => typeof got === "string" && typeof want === "string" && timingSafeEqual(sha256(got), sha256(want));
 
+/**
+ * The current bearer token: $BOXERY_MCP_TOKEN, or --token-file read again whenever the file changes (a stat
+ * per request, as the proxy does for tokens.json), so rotating it revokes the old token without a restart.
+ * A missing or empty file gives no token, and every request is refused until it is fixed.
+ * @returns {() => string | undefined}
+ */
+function tokenSource() {
+	const file = TOKEN_FILE;
+	if (!file) {
+		const token = process.env.BOXERY_MCP_TOKEN;
+		return () => token;
+	}
+	/** @type {{ key: string, token: string | undefined } | null} */
+	let cache = null;
+	return () => {
+		try {
+			const st = statSync(file, { bigint: true });
+			const key = `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+			if (cache?.key !== key) cache = { key, token: readFileSync(file, "utf8").trim() || undefined };
+			return cache.token;
+		} catch {
+			cache = null;
+			return undefined;
+		}
+	};
+}
+
 /** @param {string} listen */
 function serveHttp(listen) {
 	const [hostPart, portPart] = listen.includes(":") ? [listen.slice(0, listen.lastIndexOf(":")), listen.slice(listen.lastIndexOf(":") + 1)] : ["127.0.0.1", listen];
-	const token = TOKEN_FILE ? readFileSync(TOKEN_FILE, "utf8").trim() : process.env.BOXERY_MCP_TOKEN;
+	const token = tokenSource();
 	const noAuth = has("--no-auth");
-	if (!token && !noAuth) {
-		log("refusing to start: set BOXERY_MCP_TOKEN or --token-file (or --no-auth for local testing)");
+	const hasScoped = () => { try { return readStore().length > 0; } catch { return false; } };
+	if (!token() && !noAuth && !hasScoped()) {
+		log(`refusing to start: no token. Create a scoped one with \`boxery mcp-token new LABEL\`, or ${TOKEN_FILE ? `fix --token-file ${TOKEN_FILE} (missing or empty)` : "set BOXERY_MCP_TOKEN or --token-file"} (or --no-auth for local testing)`);
 		process.exit(2);
 	}
+	if (token()) log("warning: the BOXERY_MCP_TOKEN / --token-file token is unscoped (every tool, VM and host); prefer scoped tokens: boxery mcp-token new");
+	// Every session's work runs inside its grant from here on; anything that loses it is refused.
+	enforce();
+	/** Who a request is: the session grant and principal (token, then tailnet user), or why it is refused.
+	 *  @param {http.IncomingMessage} req @returns {{ grant: Grant, principal: string } | { error: string }} */
+	const authenticate = (req) => {
+		if (noAuth) return { grant: UNSCOPED, principal: "none" };
+		const authz = req.headers.authorization;
+		const legacy = token();
+		if (legacy && secretEquals(authz, `Bearer ${legacy}`)) return { grant: UNSCOPED, principal: "legacy" };
+		const m = typeof authz === "string" ? /^Bearer (\S+)$/.exec(authz) : null;
+		const v = m ? verifyToken(m[1]) : null;
+		if (v && "entry" in v) return { grant: { kind: "token", id: v.entry.id, label: v.entry.label, defaultHost: DEFAULT_HOST.name }, principal: `token:${v.entry.id}` };
+		return { error: v && "expired" in v ? `token '${v.expired}' expired; ask the user for a new one (boxery mcp-token new)` : "unauthorized" };
+	};
 	if (noAuth && !LOOPBACK.includes(hostPart)) {
 		log("refusing to start: --no-auth serves every VM tool unauthenticated, so it only listens on loopback");
 		process.exit(2);
@@ -438,17 +496,22 @@ function serveHttp(listen) {
 			// DNS-rebinding guard: browsers send Origin; reject unknown ones.
 			const origin = req.headers.origin;
 			if (origin && !allowOrigins.includes(origin)) return send(403, { error: `origin not allowed: ${origin}` });
-			if (!noAuth && !secretEquals(req.headers.authorization, `Bearer ${token}`)) return send(401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
+			const auth = authenticate(req);
+			if ("error" in auth) return send(401, { error: auth.error }, { "www-authenticate": req.headers.authorization ? 'Bearer error="invalid_token"' : "Bearer" });
+			let principal = auth.principal;
 			if (allowUsers.length) {
 				// Set by `tailscale serve` for requests from tailnet users (absent for tagged devices).
 				const who = req.headers["tailscale-user-login"];
 				if (!who || !allowUsers.includes(String(who))) return send(403, { error: `tailnet user not allowed: ${who ?? "(none)"}` });
+				principal += `|${who}`;
 			}
+			// A session belongs to whoever opened it: another token (or tailnet user) can't use or end it.
+			const own = (/** @type {Session | undefined | "" } */ x) => (x && x.principal === principal ? x : undefined);
 			const sid = /** @type {string | undefined} */ (req.headers["mcp-session-id"]); // node joins a repeated header
 			if (req.method === "DELETE") {
-				const ended = sid && sessions.get(sid);
+				const ended = own(sid && sessions.get(sid));
 				if (ended) {
-					sessions.delete(sid);
+					sessions.delete(ended.id);
 					await endSession(ended);
 				}
 				return send(204, null);
@@ -474,10 +537,10 @@ function serveHttp(listen) {
 			const msgs = Array.isArray(msg) ? msg : [msg];
 			let session;
 			if (msgs.some((m) => m?.method === "initialize")) {
-				session = newSession();
+				session = newSession(auth.grant, principal);
 				sessions.set(session.id, session);
 			} else {
-				session = sid && sessions.get(sid);
+				session = own(sid && sessions.get(sid));
 				if (!session) return send(404, { jsonrpc: "2.0", id: null, error: { code: -32001, message: "unknown or missing Mcp-Session-Id; re-initialize" } });
 			}
 			res.on("close", () => {

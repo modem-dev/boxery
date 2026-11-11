@@ -396,6 +396,7 @@ Generated from the help `boxery help --all` shows (`controller/cli.mjs`); edit i
 
 | Command | What it does |
 |---|---|
+| `boxery mcp-token new LABEL [--vm PATTERN]... [--host NAME]... [--tools TOOL[:ACTION],... \| --read-only] [--admin] [--ttl 30d\|12h\|never]`<br>`boxery mcp-token ls [--json]`<br>`boxery mcp-token rm LABEL` | Scoped tokens for the HTTP MCP server (boxery-mcp --http) [→](mcp.md#scoped-tokens) |
 | `boxery pin NAME [--from-guest]` | Re-pin a VM's ssh host key (VMs made before keys were pinned) [→](security.md#vm-host-keys) |
 | `boxery shapes [--json]` | VM sizes on every host (* = default; --host NAME: one) [→](shapes.md) |
 | `boxery version [--json]` | Controller and every host's version; warns per host |

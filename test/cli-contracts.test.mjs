@@ -95,9 +95,9 @@ test("root flag aliases never resolve inherited object properties", () => {
 	}
 });
 
-test("PRE_HOST is the controller-scope commands: help and setup", () => {
+test("PRE_HOST is the controller-scope commands: help, mcp-token (this machine's MCP tokens) and setup", () => {
 	assert.deepEqual([...PRE_HOST].sort(), commands.filter(([, , c]) => c.scope === "controller").map(([n]) => n).sort());
-	assert.deepEqual([...PRE_HOST].sort(), ["help", "setup"]);
+	assert.deepEqual([...PRE_HOST].sort(), ["help", "mcp-token", "setup"]);
 });
 
 test("every host-scope command is dispatched to a host: --host ghost reaches the host lookup, whatever the words", () => {

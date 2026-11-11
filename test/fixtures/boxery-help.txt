@@ -38,6 +38,7 @@ Command families (boxery FAMILY --help):
   runners once|status|...               GitHub Actions runners on pool VMs
 
 More:
+  mcp-token new|ls|rm                   Scoped tokens for the HTTP MCP server (boxery-mcp --http)
   pin NAME                              Re-pin a VM's ssh host key (VMs made before keys were pinned)
   shapes                                VM sizes on every host (* = default; --host NAME: one)
   version                               Controller and every host's version; warns per host

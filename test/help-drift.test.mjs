@@ -26,6 +26,7 @@ const PARSED_IN = {
 	grant: [["core/grant-approval.mjs", "parseGrantArgs"]],
 	runners: [["controller/runners-once.mjs", "runnersOnce"]],
 	version: [["controller/cli.mjs", "cmdVersion"]],
+	"mcp-token": [["controller/mcp-tokens.mjs", "mcpTokenCommand"]],
 };
 // Flags in a handler that aren't its own options: arguments it gives ssh, gh or the VM helper.
 const NOT_OPTIONS = {

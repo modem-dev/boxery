@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import { assertName, cliHint, currentHost, sshRun } from "./boxery-core.mjs";
 import { profileConfig } from "./profile.mjs";
+import { authorizeVm } from "./mcp-auth.mjs";
 
 const SETUP = 'if test -e /etc/boxery/headless; then echo headless\nelif command -v boxery-vnc-password >/dev/null; then p=$(boxery-vnc-password --new) && echo "password $p"\nelse echo nopassword; fi';
 
@@ -62,6 +63,7 @@ export function openUrl(url) {
 export async function openDesktop(name, { open = true } = {}) {
 	const { url, port, warning } = await prepareDesktop(name);
 	const { env } = await profileConfig();
+	await authorizeVm(currentHost(), name); // scoped MCP tokens (core/mcp-auth.mjs)
 	const child = spawn("ssh", tunnelArgs(name, port, { batch: true }), { stdio: "ignore", env });
 	const ended = new Promise((resolve) => { child.once("error", () => resolve(127)); child.once("exit", (code) => resolve(code ?? 1)); });
 	// Up once the port answers and our ssh is still there (another program taking the port first makes ssh

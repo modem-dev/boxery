@@ -13,6 +13,7 @@ import { q } from "./shell.mjs";
 import { streamCopy } from "./copy-stream.mjs";
 import { DEFAULT_HOST_BIN, VALID_DEST, localHostBin, parseConfig, shellWord } from "./ssh-config.mjs";
 import { acquireLease, findLease, releaseLease, renewLease } from "./leases.mjs";
+import { authorizeAdmin, authorizeVm } from "./mcp-auth.mjs";
 import * as lifecycle from "./lifecycle.mjs";
 import { versions as versionInfo } from "./versions.mjs";
 import { parseGrantRequest, grantPrompt, grantCommand, listGrants, addGrants } from "./grants.mjs";
@@ -255,6 +256,7 @@ export function describeHosts() {
  */
 export async function addHost({ name, dest, backend, profile }, { progress } = {}) {
 	assertHost(name);
+	authorizeAdmin(`adding host ${name}`);
 	if (typeof dest !== "string" || !VALID_DEST.test(dest)) throw new Error(`invalid destination "${dest ?? ""}" (local, or an ssh destination such as user@host)`);
 	if (backend != null && !VALID_HOST.test(backend)) throw new Error(`invalid backend "${backend}"`);
 	if (profile != null && !VALID_HOST.test(profile)) throw new Error(`invalid host profile "${profile}"`);
@@ -269,6 +271,7 @@ export async function addHost({ name, dest, backend, profile }, { progress } = {
  *  grants stay). @param {string} name @returns {Promise<string>} */
 export async function removeHost(name) {
 	assertHost(name);
+	authorizeAdmin(`removing host ${name}`);
 	const registry = await import("./registry.mjs");
 	const { io, text } = registry.textIO();
 	try { await registry.withRegistryLock(async () => registry.removeHostLocked(name, io)); }
@@ -345,10 +348,11 @@ export function parseLoc(spec, current) {
  * (vmProblem), unless a fresh connection works: then the 255 was the script's own and resolves.
  * @param {string} vm @param {string} script @param {SshRunOpts} [opts] @returns {Promise<SshResult>}
  */
-export function sshRun(vm, script, opts = {}) {
+export async function sshRun(vm, script, opts = {}) {
+	if (!VALID_NAME.test(vm ?? "")) throw new Error(`invalid VM name "${vm}"`);
+	const host = currentHost();
+	await authorizeVm(host, vm); // scoped MCP tokens (core/mcp-auth.mjs)
 	return new Promise((resolve, reject) => {
-		if (!VALID_NAME.test(vm ?? "")) return reject(new Error(`invalid VM name "${vm}"`));
-		const host = currentHost();
 		const { sshConf } = host;
 		if (!existsSync(sshConf)) return reject(new Error(`boxery not set up (${sshConf} missing); run: boxery setup user@host`));
 		// stdin is a pipe whenever it is used (opts.input != null).
@@ -449,6 +453,7 @@ export const noSuchVm = (vm) => `no such vm: ${vm} on host ${currentHost().name}
  */
 export async function vmProblem(vm, { env, signal } = {}) {
 	assertName(vm);
+	await authorizeVm(currentHost(), vm);
 	const probe = await new Promise((/** @type {(r: { code: number | null, stderr: string }) => void} */ resolve) => {
 		const child = spawn("ssh", ["-F", currentHost().sshConf, "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", `${vm}.boxery`, "true"],
 			{ stdio: ["ignore", "ignore", "pipe"], ...(env ? { env } : {}) });
@@ -966,6 +971,8 @@ export async function copyTool({ from, to }, { current, localCwd = process.cwd()
 	};
 	const source = endpoint(src);
 	const destination = endpoint(dst, path.posix.basename(source.path));
+	// The copy's own ssh (core/copy-stream.mjs) carries no host context: check each VM endpoint here, on its host.
+	for (const loc of [src, dst]) if (loc.vm) await authorizeVm(loc.host, loc.vm);
 	// (Each endpoint on its own host: HOST/NAME:path may name another.)
 	const unreachable = (/** @type {CopyEndpoint} */ e) => withHost(e === source ? src.host : dst.host, () => vmProblem(/** @type {string} */ (e.vm), { signal }));
 	const bytes = await streamCopy(source, destination, { signal, unreachable });

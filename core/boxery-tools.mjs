@@ -17,6 +17,7 @@
 import * as core from "./boxery-core.mjs";
 import { BACKENDS as BACKEND_DECLARATIONS } from "../backends/index.mjs";
 import { SYNC_OUTPUT, syncTool } from "./sync.mjs";
+import { authorizeAdmin, authorizeHostName, authorizeTool, authorizeVm, visibleHost, visibleVm } from "./mcp-auth.mjs";
 /** @import { Approve, HostProfile, LocalConfinement, ManageArgs, Progress, ToolResult } from "./boxery-core.mjs" */
 /** A JSON Schema fragment. @typedef {{ type?: string | string[], description?: string, enum?: readonly string[], properties?: Record<string, JsonSchema>, items?: JsonSchema, required?: string[], anyOf?: JsonSchema[], minimum?: number, maximum?: number }} JsonSchema */
 /** A tool's input schema: always an object with named properties. @typedef {JsonSchema & { type: "object", properties: Record<string, JsonSchema>, required: string[] }} ObjectSchema */
@@ -407,16 +408,25 @@ export function callTarget(tool, args, s) {
 
 /**
  * Run a TOOLS entry (or a front-end's own tool of the same shape): resolve its target (callTarget), then run it on that host.
- * @param {Pick<Tool, "noVm" | "run">} tool @param {Record<string, any>} args @param {Session} s @param {ToolContext} [ctx] @returns {Promise<ToolResult>}
+ * @param {Pick<Tool, "noVm" | "run"> & { name?: string }} tool @param {Record<string, any>} args @param {Session} s @param {ToolContext} [ctx] @returns {Promise<ToolResult>}
  */
 export async function runTool(tool, args, s, ctx = {}) {
 	const { host, current, vm, args: a } = callTarget(tool, args, s);
+	// Scoped MCP tokens (core/mcp-auth.mjs): the tool and action first, for a clear refusal. VMs and hosts are
+	// checked again where boxery acts on them (ssh, host commands), whatever argument named them.
+	authorizeTool(tool.name ?? "", typeof args.action === "string" ? args.action : null);
+	authorizeHostName(host.name);
+	if (vm) await authorizeVm(host, vm);
+	if (tool.name === "vm_manage" && args.action === "host_rm") authorizeAdmin(`removing host ${args.name ?? ""}`);
 	return core.withHost(host, () => tool.run(/** @type {string} */ (vm), a, { ...ctx, session: s, host, current }));
 }
 
+/** Tool → its actions (the `action` enum) or null: what a token's --tools may name (core/mcp-tokens.mjs). @returns {Record<string, readonly string[] | null>} */
+export const toolCatalog = () => Object.fromEntries(TOOLS.map((t) => [t.name, t.parameters.properties.action?.enum ?? null]));
+
 /** vm_info hosts: the registered hosts, `host` marked current. @param {HostProfile} host @returns {ToolResult} */
 export function hostsResult(host) {
-	const hosts = core.describeHosts().map(({ name, destination, backend, default: def, same_as, dir }) =>
+	const hosts = core.describeHosts().filter((h) => visibleHost(h.name)).map(({ name, destination, backend, default: def, same_as, dir }) =>
 		({ name, destination, backend, current: name === host.name, default: def, same_as, dir }));
 	const row = (/** @type {(typeof hosts)[number]} */ h) => [`${h.name}${h.current ? " *" : ""}`, h.destination ?? "-", h.backend ?? "-",
 		[h.default && "default", h.same_as.length && `same host as ${h.same_as.join(", ")}`].filter(Boolean).join("; ") || "-", h.dir].join("\t");
@@ -437,7 +447,7 @@ export async function infoAction(a, { host, current }) {
 	};
 	switch (a.action) {
 		case "list": {
-			const vms = await core.listVms();
+			const vms = (await core.listVms()).filter((/** @type {{ name: string }} */ v) => visibleVm(host.name, v.name));
 			return { text: `${core.formatVms(vms)}\ncurrent: ${current ?? "(none)"} (host: ${host.name})`, structured: { vms, current: current ?? null, host: host.name } };
 		}
 		case "shapes": {
@@ -455,7 +465,7 @@ export async function infoAction(a, { host, current }) {
 			return { text: core.formatSnaps(vm, snapshots), structured: { vm, snapshots } };
 		}
 		case "images": {
-			const images = await core.listImages();
+			const images = (await core.listImages()).filter((/** @type {{ image: string }} */ i) => visibleVm(host.name, String(i.image).split("@")[0]));
 			return { text: core.formatImages(images), structured: { images } };
 		}
 		case "version": {

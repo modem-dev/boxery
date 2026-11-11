@@ -8,6 +8,7 @@ import { parseGrantSpec } from "./grants.mjs";
 import { q } from "./shell.mjs";
 import { writeAtomic } from "./fsutil.mjs";
 import { closeMaster, hostRun, writeSshConfig } from "./profile.mjs";
+import { authorizeVm } from "./mcp-auth.mjs";
 /** @import { Grant, GrantSpec } from "./boxery-core.mjs" */
 /** CLI env-command helpers may use the original stdin and show prompts on stderr. Agent calls remain headless.
  * @typedef {{ signal?: AbortSignal, interactiveCommands?: boolean, commandStdin?: number }} GrantOptions
@@ -189,6 +190,7 @@ export async function applyGrants(vm, opts = {}) {
 	// Include HTTP URL setup even if a credential command failed, as the previous reconciler did.
 	for (const g of grants) if (g.kind === "http") values.push(`put_edge ${q(g.host ?? "")}`);
 	const script = guestTemplate.replace("# BOXERY_GRANT_VALUES", () => values.join("\n"));
+	await authorizeVm(currentHost(), assertName(vm)); // scoped MCP tokens (core/mcp-auth.mjs)
 	const output = await new Promise((resolve, reject) => {
 		const child = execFile("ssh", ["-F", currentHost().sshConf, `${assertName(vm)}.boxery`, "bash -s"], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024, signal: opts.signal }, (e, stdout, stderr) => e ? reject(new Error(`could not apply grants to ${vm}: ${stderr || e.message}`)) : resolve(`${stdout}${stderr}`.trim()));
 		child.stdin?.on("error", () => {}); child.stdin?.end(script);
