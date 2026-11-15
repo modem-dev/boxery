@@ -103,13 +103,13 @@ test("ago: how long ago, short; none is -", () => {
 		["-", "-", "just now", "just now", "1m ago", "59m ago", "1h ago", "47h ago", "2d ago", "9d ago", "just now"]);
 });
 
-test("formatVms: LAST CONNECTED and CREATED BY when the host reports them, so an agent can tell its own VMs and stale ones", () => {
+test("formatVms: CONNECTED and CREATED BY when the host reports them, so an agent can tell its own VMs and stale ones", () => {
 	const now = Math.floor(Date.now() / 1000);
 	const lines = core.formatVms([
 		{ name: "mine", state: "running", created_at: now - 7200, created_by: "ben@mac via claude-code", last_connected_at: now - 120, grants: [] },
 		{ name: "old", state: "shut off", created_at: null, created_by: null, last_connected_at: null, grants: [] },
 	]).split("\n");
-	assert.match(lines[0], /^NAME +STATE +SSH +DISK +SHAPE +KIND +LEASE +LAST CONNECTED +CREATED BY +GRANTS$/);
+	assert.match(lines[0], /^NAME +STATE +SSH +DISK +SHAPE +KIND +LEASE +CONNECTED +CREATED BY +GRANTS$/);
 	assert.match(lines[1], /^mine +running .* 2m ago +ben@mac via claude-code +-$/);
 	assert.match(lines[2], /^old +shut off .* - +- +-$/);
 });

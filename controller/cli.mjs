@@ -401,7 +401,7 @@ export const COMMANDS = {
 	ls: {
 		help: {
 			group: "vms", summary: "list VMs: every host's, a section each (--host NAME: one)", usage: ["ls [--json] [--refresh] [--running]"],
-			details: ["One header for every host's rows. LAST CONNECTED is when a VM last got a new ssh connection and CREATED BY who made it (user@machine, or user@machine via CLIENT for an agent): together they show VMs nobody uses any more. STATUS says what is worth knowing about a VM: its pool lease, outdated guest software (see boxery patch) and grants. Notes come after the table, on stderr; a host that can't be reached fails ls once the others are listed. --json lists one host."],
+			details: ["One header for every host's rows. CONNECTED is when a VM last got a new ssh connection and CREATED BY who made it (user@machine, or user@machine via CLIENT for an agent): together they show VMs nobody uses any more. STATUS says what is worth knowing about a VM: its pool lease, outdated guest software (see boxery patch) and grants. Notes come after the table, on stderr; a host that can't be reached fails ls once the others are listed. --json lists one host."],
 			flags: [JSON_FLAG, ["--refresh", "Read the guest software record from each running VM first"], ["--running", "Only running VMs"]],
 			examples: [["Every host's VMs", "boxery ls"], ["One host's running VMs", "boxery --host hornet ls --running"]],
 			seeAlso: ["patch", "host"], docs: "cli.md#lifecycle",

@@ -2,7 +2,7 @@
 // first); with --host NAME, that host's. The table is drawn here from the hosts' `ls --json` (listVms), so
 // every host's rows share one header and one set of column widths, and what is worth reading about a VM
 // (its pool lease, outdated guest software, grants) is one STATUS column, "-" when there's nothing to say.
-// LAST CONNECTED is when the VM last got a new ssh connection, and CREATED BY who made it: what tells a VM someone
+// CONNECTED is when the VM last got a new ssh connection, and CREATED BY who made it: what tells a VM someone
 // still uses from one an agent left behind.
 // Notes (VMs not checked yet, a host that failed) come after the table, on stderr.
 import { realpathSync } from "node:fs";
@@ -19,7 +19,7 @@ import { die, hint, hostFailed, needHost, note, quit, say, select, usage, warn }
  *   (via: grants given under another name for the same host, which ls doesn't list separately) */
 /** One host's listing, or why there is none. @typedef {{ name: string, heading: string, vms: Vm[], notes: string, error: Error | null }} Section */
 
-const COLUMNS = ["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "LAST CONNECTED", "CREATED BY", "STATUS"];
+const COLUMNS = ["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "CONNECTED", "CREATED BY", "STATUS"];
 const running = (/** @type {Vm} */ vm) => ["running", "idle"].includes(vm.state ?? "");
 
 /** ls [--json] [--refresh] [--running]. allHosts: no --host was given.

@@ -1196,7 +1196,7 @@ export function formatVms(vms) {
 	const kind = (/** @type {VmInfo} */ v) => (v.desktop === false ? "headless" : "desktop"); // no field: a host from before headless VMs
 	const lease = (/** @type {VmInfo} */ v) => v.lease?.state?.toLowerCase() ?? "-"; // hosts from before lowercase lease states
 	const guest = vms.some((v) => v.guest) ? (/** @type {VmInfo} */ v) => [v.guest?.status ?? "-"] : () => []; // hosts from before build records: no column
-	const rows = [["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "LEASE", ...(vms.some((v) => v.guest) ? ["GUEST"] : []), ...(vms.some((v) => "last_connected_at" in v) ? ["LAST CONNECTED", "CREATED BY"] : []), "GRANTS"],
+	const rows = [["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "LEASE", ...(vms.some((v) => v.guest) ? ["GUEST"] : []), ...(vms.some((v) => "last_connected_at" in v) ? ["CONNECTED", "CREATED BY"] : []), "GRANTS"],
 		...vms.map((v) => [v.name, v.state ?? "-", fmtAddr(v), fmtDisk(v), v.shape ?? "-", kind(v), lease(v), ...guest(v), ...usage(v), (v.grants ?? []).map(fmtGrant).join(",") || "-"])];
 	const w = rows[0].map((_, i) => Math.max(...rows.map((r) => String(r[i]).length)));
 	const table = rows.map((r) => r.map((c, i) => (i === r.length - 1 ? c : String(c).padEnd(w[i]))).join("  ")).join("\n");

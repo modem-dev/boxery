@@ -56,7 +56,7 @@ boxery host rm hornet                       # forget only; preserves VMs and pro
 
 Without `--host`, `ls` lists every registered host's VMs under one header, a section each (the default host first, each headed by its name, backend and where it runs); names for the same host (`same_as` in `host ls --json`) are listed once, headed `(also NAME)`, with each name's grants. The hosts are asked at once; one that can't be reached shows `(ls failed: see below)`, its error follows the table on stderr, the others are still listed, and `ls` exits 1. `--host NAME ls` lists that host's alone, without a heading, and so does `ls` when only one host is registered. `ls --json` is always one host's VMs (the default's, or `--host NAME`'s). See [Named hosts](hosts.md) for isolation, imports, precedence and safe removal. `--host NAME` precedes the command and also scopes grants and lease keys.
 
-To find VMs nobody uses any more, read `LAST CONNECTED` and `CREATED BY` in `ls`: when each VM last got a new ssh connection (`3d ago`; `-` for none since that was recorded) and who made it (`ben@mac`, or `ben@mac via claude-code` when an agent did). `ls --json` has them as `last_connected_at`, `created_by` and `created_at`.
+To find VMs nobody uses any more, read `CONNECTED` and `CREATED BY` in `ls`: when each VM last got a new ssh connection (`3d ago`; `-` for none since that was recorded) and who made it (`ben@mac`, or `ben@mac via claude-code` when an agent did). `ls --json` has them as `last_connected_at`, `created_by` and `created_at`.
 
 The read-only commands `lease ls`, `pool ls`, `version`, `shapes`, `host capabilities`, `host backends`, `host upgrade --check` and `runners status` also list every host without `--host`, using the same sections, default-first ordering and same-host deduplication as `ls`. `snapshot images` instead adds a `HOST` column to its table. Older spellings (`leases`, `images`, `capabilities`, `backends`, `upgrade-host --check`) behave identically. With only one host, output stays unchanged. `--host NAME` and `--json` always mean one host (the selected default for JSON without `--host`). Unreachable hosts do not hide the others: their errors follow the output on stderr and the command exits 1 once. `lease ls` reads local lease records only and does not contact hosts. `host upgrade --check` prints each host's report under its heading, without host-name prefixes. `version` prints the controller once, then each host's version, warning separately for each host that is behind. Real upgrades, mutating commands and commands taking a VM name remain on the selected host.
 
@@ -78,7 +78,7 @@ boxery new demo                              # ~13 s   [--shape large] [--cpus N
 boxery new ci-1 --headless                   # no desktop, no build-base needed: ~50 s on Lima (see below)
 boxery host build-base                       # the host's desktop base image (one time, ~3 min); older spelling: build-base
 boxery shapes [--json]                       # VM sizes the host offers (* = default); see Shapes
-boxery ls [--json] [--refresh] [--running]   # VMs on every host, grouped; LAST CONNECTED, CREATED BY; STATUS: lease, outdated guest, grants
+boxery ls [--json] [--refresh] [--running]   # VMs on every host, grouped; CONNECTED, CREATED BY; STATUS: lease, outdated guest, grants
 boxery patch demo | --all [--wait S]         # update a VM's guest software to the host's image layers
 boxery start demo | stop demo
 boxery resize demo --cpus 8 --mem 16384      # [--disk GiB]; restarts a running VM

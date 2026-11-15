@@ -75,7 +75,7 @@ printf "HOST='local'\nHOST_BIN='%s'\n" "$tmp/other-host" >"$other/config"
 printf '# untouched ssh config\n' >"$other/ssh_config"
 "$CLI" host add gamma --config-dir "$other" >/dev/null
 if "$CLI" ls >"$tmp/ls.out" 2>"$tmp/ls.err"; then echo 'ls succeeded with a failing host' >&2; exit 1; fi
-[ "$(sed -n 1p "$tmp/ls.out")" = 'NAME  STATE     SSH  DISK  SHAPE  KIND     LAST CONNECTED  CREATED BY  STATUS' ]
+[ "$(sed -n 1p "$tmp/ls.out")" = 'NAME  STATE     SSH  DISK  SHAPE  KIND     CONNECTED  CREATED BY  STATUS' ]
 [ "$(sed -n 2p "$tmp/ls.out")" = 'alpha (default): on user@fake' ]
 [ "$(grep -c '^NAME ' "$tmp/ls.out")" -eq 1 ]
 grep -q '^demo  running ' "$tmp/ls.out"; grep -q '^web   shut off ' "$tmp/ls.out"

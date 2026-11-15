@@ -226,7 +226,7 @@ test("text ls is drawn from ls --json: last connection, creator, and grants, poo
 ]\n`);
 	const r = await headless(["ls"]);
 	assert.equal(r.code, 0, r.output);
-	assert.match(r.stdout, /^NAME +STATE +SSH +DISK +SHAPE +KIND +LAST CONNECTED +CREATED BY +STATUS\n/);
+	assert.match(r.stdout, /^NAME +STATE +SSH +DISK +SHAPE +KIND +CONNECTED +CREATED BY +STATUS\n/);
 	assert.match(r.stdout, /^demo +running +10\.0\.0\.2:22 +1\.3\/40GiB +standard +desktop +3d ago +ben@mac via claude-code +grants env:SHOWN$/m);
 	assert.match(r.stdout, /^pool1 +shut off +- +- +- +headless +- +- +pool free; outdated guest \(layers changed\)$/m, "a host from before: -");
 	assert.match(r.stdout, /^pool2 +running .* leased by ben@mac, 2h left$/m);
