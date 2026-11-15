@@ -215,7 +215,7 @@ async function oldStore(v, files) {
 }
 const rows = () => db.prepare("SELECT * FROM vm_records ORDER BY name").all().map((r) => ({ ...r }));
 /** @param {string} name @param {string} kind @param {string} os @param {string | null} [shape] @param {number | null} [cpus] @param {number | null} [mem] @param {number | null} [disk] */
-const rec = (name, kind, os, shape = null, cpus = null, mem = null, disk = null) => ({ name, kind, os, shape, cpus, mem, disk });
+const rec = (name, kind, os, shape = null, cpus = null, mem = null, disk = null) => ({ name, kind, os, shape, cpus, mem, disk, created_at: null, created_by: null });
 
 it("v1 → v2 imports the record files, with defaults for the records a VM lacks, and retires them", async () => {
 	const c = L.claim(db, "h", 600, KEY);
@@ -231,7 +231,7 @@ it("v1 → v2 imports the record files, with defaults for the records a VM lacks
 	};
 	await oldStore(1, files);
 	db = L.open(file);
-	assert.equal(L.schemaVersion(db), 2);
+	assert.equal(L.schemaVersion(db), L.SCHEMA_VERSION);
 	assert.deepEqual(rows(), [
 		rec("custom", "desktop", "linux", null, 2, 2048, 10),
 		rec("full", "headless", "linux", "large", 8, 16384, 80),
@@ -261,7 +261,7 @@ it("v1 → v2: a record file that can't be read counts as missing; the store sti
 	chmodSync(path.join(conf(), "vm-kind/locked"), 0o000);
 	try {
 		db = L.open(file);
-		assert.equal(L.schemaVersion(db), 2);
+		assert.equal(L.schemaVersion(db), L.SCHEMA_VERSION);
 		// root reads the file anyway; anyone else gets the default kind
 		const kind = process.getuid?.() === 0 ? "headless" : "desktop";
 		assert.deepEqual(rows(), [rec("dir", "desktop", "linux"), rec("locked", kind, "linux")]);
@@ -276,6 +276,22 @@ it("v1 → v2 with no record files, and a store from before versioning with some
 	await oldStore(0, { "vm-kind/old": "headless\n" });
 	db = L.open(file);
 	assert.deepEqual(rows(), [rec("old", "headless", "linux")]);
+});
+
+it("v2 → v3 adds when and by whom each VM was made, null for the VMs it has, keeping their rows", async () => {
+	db.close();
+	const d = await raw(file);
+	d.exec(`DROP TABLE vm_records; CREATE TABLE vm_records (name TEXT PRIMARY KEY, kind TEXT NOT NULL, os TEXT NOT NULL, shape TEXT, cpus INTEGER, mem INTEGER, disk INTEGER);
+		INSERT INTO vm_records VALUES ('a', 'headless', 'linux', 'large', 8, 16384, 80); PRAGMA user_version = 2`);
+	d.close();
+	db = L.open(file);
+	assert.equal(L.schemaVersion(db), L.SCHEMA_VERSION);
+	assert.deepEqual(rows(), [rec("a", "headless", "linux", "large", 8, 16384, 80)]);
+	db.exec("PRAGMA user_version = 2"); // a version reset with the columns already there: opens, adds nothing
+	db.close();
+	db = L.open(file);
+	assert.equal(L.schemaVersion(db), L.SCHEMA_VERSION);
+	assert.deepEqual(columns(db, "vm_records").filter((c) => c.startsWith("created")), ["created_at", "created_by"]);
 });
 
 it("a store newer than the code is refused with a clear error and left as it is", async () => {

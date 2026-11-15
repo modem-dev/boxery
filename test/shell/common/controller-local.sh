@@ -52,7 +52,7 @@ if "$A" new w4 --shape 'x;id' >/dev/null 2>&1; then bad "invalid --shape accepte
 "$A" ls --json | grep '"name":"hc"' | grep '"desktop":false,' | grep -q ',"grants":\[' && ok "ls --json: desktop false, with grants" || bad "ls --json headless: $("$A" ls --json)"
 "$A" ls | grep -q '^hc .* headless ' && ok "ls shows KIND" || bad "ls KIND: $("$A" ls)"
 "$A" ls --refresh --json | jq -e 'map(select(.name == "hc"))[0] | .guest.status == "unknown" and (.grants | type) == "array"' >/dev/null && ok "ls --refresh --json: guest status, with grants" || bad "ls --refresh: $("$A" ls --refresh --json 2>&1)"
-"$A" ls --refresh 2>/dev/null | grep -q '^hc .* headless  *-$' && ok "ls --refresh: STATUS last, - with nothing to say" || bad "ls --refresh: $("$A" ls --refresh 2>&1)"
+"$A" ls --refresh 2>/dev/null | grep -q '^hc .* headless  *-  *[^ ]*@[^ ]*  *-$' && ok "ls --refresh: CONNECTED (- before any connection), CREATED BY, STATUS last, - with nothing to say" || bad "ls --refresh: $("$A" ls --refresh 2>&1)"
 if "$A" ls --bogus >/dev/null 2>&1; then bad "ls --bogus accepted"; else ok "ls rejects unknown flags"; fi
 for a in "" "x;id" "--wait"; do
 	# shellcheck disable=SC2086

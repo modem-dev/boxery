@@ -56,6 +56,8 @@ boxery host rm hornet                       # forget only; preserves VMs and pro
 
 Without `--host`, `ls` lists every registered host's VMs under one header, a section each (the default host first, each headed by its name, backend and where it runs); names for the same host (`same_as` in `host ls --json`) are listed once, headed `(also NAME)`, with each name's grants. The hosts are asked at once; one that can't be reached shows `(ls failed: see below)`, its error follows the table on stderr, the others are still listed, and `ls` exits 1. `--host NAME ls` lists that host's alone, without a heading, and so does `ls` when only one host is registered. `ls --json` is always one host's VMs (the default's, or `--host NAME`'s). See [Named hosts](hosts.md) for isolation, imports, precedence and safe removal. `--host NAME` precedes the command and also scopes grants and lease keys.
 
+To find VMs nobody uses any more, read `CONNECTED` and `CREATED BY` in `ls`: when each VM last got a new ssh connection (`3d ago`; `-` for none since that was recorded) and who made it (`ben@mac`, or `ben@mac via claude-code` when an agent did). `ls --json` has them as `last_connected_at`, `created_by` and `created_at`.
+
 The read-only commands `lease ls`, `pool ls`, `version`, `shapes`, `host capabilities`, `host backends`, `host upgrade --check` and `runners status` also list every host without `--host`, using the same sections, default-first ordering and same-host deduplication as `ls`. `snapshot images` instead adds a `HOST` column to its table. Older spellings (`leases`, `images`, `capabilities`, `backends`, `upgrade-host --check`) behave identically. With only one host, output stays unchanged. `--host NAME` and `--json` always mean one host (the selected default for JSON without `--host`). Unreachable hosts do not hide the others: their errors follow the output on stderr and the command exits 1 once. `lease ls` reads local lease records only and does not contact hosts. `host upgrade --check` prints each host's report under its heading, without host-name prefixes. `version` prints the controller once, then each host's version, warning separately for each host that is behind. Real upgrades, mutating commands and commands taking a VM name remain on the selected host.
 
 ### Backend discovery
@@ -76,7 +78,7 @@ boxery new demo                              # ~13 s   [--shape large] [--cpus N
 boxery new ci-1 --headless                   # no desktop, no build-base needed: ~50 s on Lima (see below)
 boxery host build-base                       # the host's desktop base image (one time, ~3 min); older spelling: build-base
 boxery shapes [--json]                       # VM sizes the host offers (* = default); see Shapes
-boxery ls [--json] [--refresh] [--running]   # VMs on every host, grouped; STATUS: lease, outdated guest, grants
+boxery ls [--json] [--refresh] [--running]   # VMs on every host, grouped; CONNECTED, CREATED BY; STATUS: lease, outdated guest, grants
 boxery patch demo | --all [--wait S]         # update a VM's guest software to the host's image layers
 boxery start demo | stop demo
 boxery resize demo --cpus 8 --mem 16384      # [--disk GiB]; restarts a running VM
@@ -551,6 +553,9 @@ VMs on one host (the default, or `--host NAME`; text `ls` lists every host), plu
 | `mem` | number \| null | memory in MiB (`null` if unknown) |
 | `desktop` | boolean | `false` for headless VMs (`new --headless`, or made from a headless VM's image); `true` otherwise, including VMs created before headless VMs existed |
 | `os` | string | the guest OS: `linux` (the only one so far; VMs made before it was recorded are `linux` too). A VM made from an image or a fork has its source's |
+| `created_at` | number \| null | when the VM was made (`new` or `fork`). `null` for VMs made before boxery recorded it, or outside boxery |
+| `created_by` | string \| null | who made it: `user@machine` of the controller that ran `new`/`fork`, then ` via CLIENT` when an agent did (the MCP client's name, such as `claude-code`, or `pi`). A label for people to read, not an identity: it is what the controller said. `null` when unknown |
+| `last_connected_at` | number \| null | when the VM last got a new ssh connection through the host: `ssh`, `run`, `cp`, `sync`, `desktop`, `forward`, and every agent `vm_*` tool. Host-side work (`start`, `patch`, `snapshot`, `ls --refresh`) doesn't count. Connections are shared for 10 minutes after their last use, so a session kept busy for hours counts from when its connection opened. `null` if it has had none since the host's boxery started recording it |
 | `guest` | object | the VM's guest software, from the host's build record (see [Outdated guest software](#lifecycle)): `status` (`current`, `outdated` or `unknown`), `reasons` (why: `layers changed`, `built N days ago`, `reboot required`, `no build record`, `not checked`), `built_at` (epoch seconds), `age_days`, `kernel` (the newest installed), `chrome` and `playwright_core` (desktops; `null` otherwise), `reboot_required`, `checked_at` (when the host last read it; `null` if never). Unknown fields are `null` |
 | `grants` | array | this machine's grants for the VM, same objects as `grants --json` |
 
@@ -679,7 +684,7 @@ The text form is tab-separated: `NAME CREATED SIZE AGE GUEST` (`AGE` like `2d`).
 
 #### `boxery-host ls --json`
 
-Same objects as `boxery ls --json` without `grants` (grants live on the controller): `name`, `state`, `ssh_addr`, `disk_size`, `disk_used`, `tunnel`, `lease`, `shape`, `cpus`, `mem`, `desktop`, `os`, `guest`. Built in one place from the backend's `backend_list` lines, the recorded VM sizes, the lease store and the build records (`--refresh`: read from running VMs first).
+Same objects as `boxery ls --json` without `grants` (grants live on the controller): `name`, `state`, `ssh_addr`, `disk_size`, `disk_used`, `tunnel`, `lease`, `shape`, `cpus`, `mem`, `desktop`, `os`, `guest`, `created_at`, `created_by`, `last_connected_at`. Built in one place from the backend's `backend_list` lines, the VM records (sizes, and who made each VM and when: `new` and `fork` record `BOXERY_BY` from the controller's environment), the lease store, the build records (`--refresh`: read from running VMs first) and `$BOXERY_CONF/last-connected/NAME`, whose mtime `connect` updates on every new connection (a file older than the VM, from an earlier VM of that name, doesn't count).
 
 #### `boxery-host snaps NAME --json`
 

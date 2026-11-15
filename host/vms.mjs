@@ -9,7 +9,7 @@ import { deleteHostKey } from "./hostkeys.mjs";
 import { issueToken, writeSeed } from "./seed.mjs";
 import { shapeSize } from "./shapes.mjs";
 import { fail, hint, log, print, sleep, stamp, validImage, validName, validNum } from "./util.mjs";
-import { createVmRecord, deleteVmRecord, inheritedType, setVmSize, vmRecord } from "./vm-records.mjs";
+import { createVmRecord, creator, deleteLastConnected, deleteVmRecord, inheritedType, setVmSize, vmRecord } from "./vm-records.mjs";
 import { hostUsage } from "./help.mjs";
 /** @import { BuildRecord } from "./build-info.mjs" */
 /** @import { GuestEndpoint } from "./guest.mjs" */
@@ -150,7 +150,8 @@ export async function createVm(rt, { name, shape, cpus, mem, disk, from, headles
 	// Restricted workloads have no root provisioning, guest SSH keys or Boxery proxy token.
 	const userdata = rt.backend === "openshell" ? "" : await step("seed", () => writeSeed(rt, name, provision));
 	await step("backend-new", () => rt.vms.call("backend_new", [name, cpus, mem, disk, userdata, src]));
-	createVmRecord(rt.db(), name, { kind, os, size: rt.backend === "openshell" ? null : await step("size", () => sizeGot(rt, name, { shape: label, cpus, mem, disk })) });
+	createVmRecord(rt.db(), name, { kind, os, size: rt.backend === "openshell" ? null : await step("size", () => sizeGot(rt, name, { shape: label, cpus, mem, disk })),
+		created_by: creator(rt.env?.BOXERY_BY) });
 	let ep = await step("endpoint", () => rt.vms.waitEndpoint(name));
 	log(rt.backend === "openshell" ? `${name}: waiting for restricted gateway SSH` : `${name} reachable at ${ep.host}:${ep.port}; waiting for ssh + cloud-init${provision ? ` (installing ${provision})` : ""}`);
 	await step("ssh", () => rt.waitSsh(name, ep));
@@ -281,7 +282,7 @@ export async function rm(rt, [name]) {
 	if (!await rt.vms.exists(name)) fail(`no such vm: ${name}`);
 	const action = rt.intent("remove", name);
 	await rt.vms.call("backend_rm", [name]);
-	deleteVmRecord(rt.db(), name); deleteBuildRecord(rt.conf, name, true);
+	deleteVmRecord(rt.db(), name); deleteBuildRecord(rt.conf, name, true); deleteLastConnected(rt.conf, name);
 	// Forks and image readers hold this source's lock until all copies are independent.
 	await cleanupVmImages(rt, name);
 	rt.deleteToken(name);

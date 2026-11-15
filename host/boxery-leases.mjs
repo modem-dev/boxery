@@ -102,7 +102,7 @@ function retryBusy(fn) {
 // The store's schema version (PRAGMA user_version; 0 = a store from before it was recorded). Every
 // schema change bumps it and adds a step to migrate(). Code refuses a store newer than it understands
 // instead of misreading it, e.g. after an upgrade that migrated it was rolled back without its copy.
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 const SCHEMA_V1 = `
 	CREATE TABLE IF NOT EXISTS vms (
 		name TEXT PRIMARY KEY,
@@ -133,6 +133,14 @@ const SCHEMA_V2 = `
 		shape TEXT, cpus INTEGER, mem INTEGER, disk INTEGER,
 		CHECK ((cpus IS NULL AND mem IS NULL AND disk IS NULL AND shape IS NULL) OR (cpus IS NOT NULL AND mem IS NOT NULL AND disk IS NOT NULL))
 	);`;
+// v3: when each VM was made and by whom (vm-records.mjs). NULL for VMs made before v3. Only the columns
+// missing are added: a store whose version was reset (or that a newer release once opened) may have them.
+const V3_COLUMNS = [["created_at", "INTEGER"], ["created_by", "TEXT"]];
+/** @param {DatabaseSync} db */
+function addV3Columns(db) {
+	const have = /** @type {{ name: string }[]} */ (db.prepare("PRAGMA table_info(vm_records)").all()).map((c) => c.name);
+	for (const [col, type] of V3_COLUMNS) if (!have.includes(col)) db.exec(`ALTER TABLE vm_records ADD COLUMN ${col} ${type}`);
+}
 
 /** v1 → v2: the record files next to the store ($CONF/vm-kind/NAME, vm-os/NAME, vm-shapes/NAME.json)
  *  become rows. A VM with only some files gets the defaults for the rest (desktop, linux, no size: ls
@@ -188,6 +196,7 @@ function migrate(db, file) {
 	checkVersion(file, v);
 	if (v < 1) db.exec(SCHEMA_V1); // a new store, or one from before versioning (same tables)
 	if (v < 2) { db.exec(SCHEMA_V2); importRecordFiles(db, path.dirname(file)); }
+	if (v < 3) addV3Columns(db);
 	if (v !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 	return v < 2;
 }

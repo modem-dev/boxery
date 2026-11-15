@@ -9,7 +9,7 @@ The host runs in Node. Bash remains where it fits: the entry point (`host/boxery
 | Module | Owns | Does not own |
 |---|---|---|
 | `controller/boxery`, `controller/*.mjs` | The laptop CLI: a Bash shim that starts `controller/cli.mjs`; argument parsing, output, grant approval, terminal commands and the host registry (`cli.mjs` dispatch; `lib.mjs` argv, output and host calls; `usage.mjs`; `status.mjs` the OSC 7501 status the long commands report to the terminal; `hosts.mjs`, `grants.mjs`, `leases.mjs`, `cp.mjs`, `jobs.mjs`, `runners-once.mjs`, `setup-openshell.mjs` per command group). VM lifecycle, leases, grants and profiles are the shared core (`core/lifecycle.mjs`, `core/leases.mjs`, `core/grants.mjs`, `core/profile.mjs`) | Host lease decisions or hypervisor mechanics |
-| `host/boxery-host` | Entry point (Bash): `connect` via `backend.sh`, everything else to Node (the node `init` recorded) | Any command logic |
+| `host/boxery-host` | Entry point (Bash): `connect` via `backend.sh` (which also records when the VM was last connected to in `last-connected/NAME`), everything else to Node (the node `init` recorded) | Any command logic |
 | `host/boxery-host.mjs` + `host/cli.mjs` | Node version check; CLI: argument dispatch, listings and their output formats, supervised mutating commands, private worker entry points | Lease policy, hypervisor commands |
 | `host/help.mjs` | Every boxery-host command's help (`help`, `COMMAND --help`, usage errors, the docs reference), rendered by `help/index.mjs`. Controllers read some of its lines to learn what an older host can do | Dispatch |
 | `host/setup.mjs` | `init` (state directory, `host.env`, proxy/reaper/runner-manager services), `build-base`, `add-key` | VM lifecycle |
@@ -24,7 +24,7 @@ The host runs in Node. Bash remains where it fits: the entry point (`host/boxery
 | `host/backend.sh` + `host/backend.mjs` | Running one allowlisted backend function per process (argv only), parsing its metadata | Any decision about what to run |
 | `host/guest.mjs` | ssh into a VM with the host's management key: commands, readiness, `authorized_keys` | Which keys a VM should accept |
 | `host/hostkeys.mjs` | Each VM's pinned ssh host key: generation for the seed, the `host-keys/NAME` record, `known-hosts`/`pin`, pinning through trusted channels | Delivering the key to the guest (seed, backends) |
-| `host/vm-records.mjs` | Each VM's record, one `vm_records` row in the store: kind, guest OS and size. Written by `new`/`fork`, `resize` and `ls` (a size it reads from the backend), deleted by `rm` and recovery; kind and OS inherited from an image's source VM | What a guest OS contains (`guests/`), the store's schema (`boxery-leases.mjs`) |
+| `host/vm-records.mjs` | Each VM's record, one `vm_records` row in the store: kind, guest OS, size, and when and by whom it was made (`BOXERY_BY`). Written by `new`/`fork`, `resize` and `ls` (a size it reads from the backend), deleted by `rm` and recovery; kind and OS inherited from an image's source VM. Also reads when a VM was last connected to (`last-connected/NAME`, which `connect` writes) | What a guest OS contains (`guests/`), the store's schema (`boxery-leases.mjs`) |
 | `host/runtime.mjs`, `host/config.mjs`, `host/shapes.mjs`, `host/util.mjs` | Per-command context (store, backend, journal, held locks), configuration, shapes, shared helpers | Side effects of their own |
 | `host/backends/*.sh` | Hypervisor-specific effects and idempotent recovery hooks | Pool ownership or lease transitions |
 

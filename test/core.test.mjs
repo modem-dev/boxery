@@ -97,6 +97,23 @@ test("vmsAreRemote: an ssh host or a cloud backend is remote; VMs on this machin
 	assert.equal(core.vmsAreRemote("local", null), null);
 });
 
+test("ago: how long ago, short; none is -", () => {
+	const now = 1_000_000;
+	assert.deepEqual([null, undefined, now, now - 59, now - 60, now - 3599, now - 3600, now - 172_799, now - 172_800, now - 9 * 86_400, now + 30].map((t) => core.ago(t, now)),
+		["-", "-", "just now", "just now", "1m ago", "59m ago", "1h ago", "47h ago", "2d ago", "9d ago", "just now"]);
+});
+
+test("formatVms: CONNECTED and CREATED BY when the host reports them, so an agent can tell its own VMs and stale ones", () => {
+	const now = Math.floor(Date.now() / 1000);
+	const lines = core.formatVms([
+		{ name: "mine", state: "running", created_at: now - 7200, created_by: "ben@mac via claude-code", last_connected_at: now - 120, grants: [] },
+		{ name: "old", state: "shut off", created_at: null, created_by: null, last_connected_at: null, grants: [] },
+	]).split("\n");
+	assert.match(lines[0], /^NAME +STATE +SSH +DISK +SHAPE +KIND +LEASE +CONNECTED +CREATED BY +GRANTS$/);
+	assert.match(lines[1], /^mine +running .* 2m ago +ben@mac via claude-code +-$/);
+	assert.match(lines[2], /^old +shut off .* - +- +-$/);
+});
+
 test("formatVms / formatGrants render the --json shapes", () => {
 	const vms = [
 		{ name: "a1", state: "running", ssh_addr: "10.0.0.2:22", disk_size: 40, disk_used: 1.04, lease: null, shape: "large", cpus: 8, mem: 16384, desktop: false, grants: [], guest: { status: "current", reasons: [] } },

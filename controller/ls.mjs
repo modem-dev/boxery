@@ -2,9 +2,11 @@
 // first); with --host NAME, that host's. The table is drawn here from the hosts' `ls --json` (listVms), so
 // every host's rows share one header and one set of column widths, and what is worth reading about a VM
 // (its pool lease, outdated guest software, grants) is one STATUS column, "-" when there's nothing to say.
+// CONNECTED is when the VM last got a new ssh connection, and CREATED BY who made it: what tells a VM someone
+// still uses from one an agent left behind.
 // Notes (VMs not checked yet, a host that failed) come after the table, on stderr.
 import { realpathSync } from "node:fs";
-import { describeHosts, listGrants, withHost } from "../core/boxery-core.mjs";
+import { ago, describeHosts, listGrants, withHost } from "../core/boxery-core.mjs";
 import * as lifecycle from "../core/lifecycle.mjs";
 import { die, hint, hostFailed, needHost, note, quit, say, select, usage, warn } from "./lib.mjs";
 /** @import { Selected } from "./lib.mjs" */
@@ -12,12 +14,12 @@ import { die, hint, hostFailed, needHost, note, quit, say, select, usage, warn }
 /** A row of listVms, as docs/cli.md describes `ls --json`.
  * @typedef {{ name: string, state?: string | null, ssh_addr?: string | null, tunnel?: string | null, disk_size?: number | null,
  *   disk_used?: number | null, shape?: string | null, desktop?: boolean, lease?: { state: string, holder?: string | null, expires_at?: number | null } | null,
- *   guest?: { status?: string, reasons?: string[], checked_at?: number | null }, grants: ReturnType<typeof import("../core/grant-operations.mjs").listGrants>,
+ *   guest?: { status?: string, reasons?: string[], checked_at?: number | null }, created_at?: number | null, created_by?: string | null, last_connected_at?: number | null, grants: ReturnType<typeof import("../core/grant-operations.mjs").listGrants>,
  *   via?: { name: string, grants: ReturnType<typeof import("../core/grant-operations.mjs").listGrants> }[] }} Vm
  *   (via: grants given under another name for the same host, which ls doesn't list separately) */
 /** One host's listing, or why there is none. @typedef {{ name: string, heading: string, vms: Vm[], notes: string, error: Error | null }} Section */
 
-const COLUMNS = ["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "STATUS"];
+const COLUMNS = ["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "CONNECTED", "CREATED BY", "STATUS"];
 const running = (/** @type {Vm} */ vm) => ["running", "idle"].includes(vm.state ?? "");
 
 /** ls [--json] [--refresh] [--running]. allHosts: no --host was given.
@@ -138,7 +140,7 @@ function cells(vm) {
 	const ssh = vm.state === "running" && vm.tunnel != null && vm.tunnel !== "up" ? `tunnel ${vm.tunnel}` : vm.ssh_addr ?? "-";
 	// USED/SIZE in GiB ("0.5/40GiB"), or only the size when the backend can't tell what's used.
 	const disk = vm.disk_size == null && vm.disk_used == null ? "-" : `${vm.disk_used == null ? "" : `${vm.disk_used.toFixed(1)}/`}${vm.disk_size ?? "?"}GiB`;
-	return [vm.name, vm.state ?? "-", ssh, disk, vm.shape ?? "-", vm.desktop === false ? "headless" : "desktop", status(vm)];
+	return [vm.name, vm.state ?? "-", ssh, disk, vm.shape ?? "-", vm.desktop === false ? "headless" : "desktop", ago(vm.last_connected_at), vm.created_by ?? "-", status(vm)];
 }
 
 /** What is worth reading about a VM, "; "-separated, or "-": its pool lease, outdated guest software, grants. @param {Vm} vm */

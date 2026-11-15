@@ -23,7 +23,7 @@ import { backends, capabilities, checkOperation } from "./capabilities.mjs";
 import { addKey, buildBase, init, profiles } from "./setup.mjs";
 import { fail, hint, jsonArray, log, print, readFd, table, validName } from "./util.mjs";
 import { HOST_COMMANDS, hostCommandHelp, hostHelp, hostResolve, hostUnknown, hostUsage } from "./help.mjs";
-import { addVmSize, vmRecords } from "./vm-records.mjs";
+import { addVmSize, lastConnected, vmRecords } from "./vm-records.mjs";
 import { fork, newVm, resize, rm, start, stop } from "./vms.mjs";
 /** @import { LeaseListEntry } from "./boxery-leases.mjs" */
 /** @import { Runtime } from "./runtime.mjs" */
@@ -77,7 +77,9 @@ async function lsJson(rt, refresh = false) {
 		const sz = sizes[vm.name];
 		return { name: vm.name, state: nz(vm.state), ssh_addr: nz(vm.ssh), disk_size: gib(vm.diskBytes) ?? sz?.disk ?? null, disk_used: gib(vm.diskUsedBytes),
 			tunnel: nz(vm.tunnel), lease: lease[vm.name] ?? null, shape: sz ? (sz.shape ?? "custom") : null, cpus: sz?.cpus ?? null, mem: sz?.mem ?? null,
-			desktop: records[vm.name]?.kind !== "headless", os: records[vm.name]?.os ?? DEFAULT_OS, guest: guest(buildRecord(rt.conf, vm.name)) };
+			desktop: records[vm.name]?.kind !== "headless", os: records[vm.name]?.os ?? DEFAULT_OS, guest: guest(buildRecord(rt.conf, vm.name)),
+			created_at: records[vm.name]?.created_at ?? null, created_by: records[vm.name]?.created_by ?? null,
+			last_connected_at: lastConnected(rt.conf, vm.name, records[vm.name]?.created_at) };
 	});
 }
 /** @typedef {Awaited<ReturnType<typeof lsJson>>[number]} LsEntry */

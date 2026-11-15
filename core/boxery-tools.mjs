@@ -16,6 +16,7 @@
 // them only through the Session hooks.
 import * as core from "./boxery-core.mjs";
 import { BACKENDS as BACKEND_DECLARATIONS } from "../backends/index.mjs";
+import { withClient } from "./profile.mjs";
 import { SYNC_OUTPUT, syncTool } from "./sync.mjs";
 /** @import { Approve, HostProfile, LocalConfinement, ManageArgs, Progress, ToolResult } from "./boxery-core.mjs" */
 /** A JSON Schema fragment. @typedef {{ type?: string | string[], description?: string, enum?: readonly string[], properties?: Record<string, JsonSchema>, items?: JsonSchema, required?: string[], anyOf?: JsonSchema[], minimum?: number, maximum?: number }} JsonSchema */
@@ -37,9 +38,10 @@ import { SYNC_OUTPUT, syncTool } from "./sync.mjs";
  *   clear()                no current VM (the session's host stays)
  *   selectHost(host)       make `host` the session's host, with no current VM
  *   removing?(name, host)  before vm_manage rm of the current VM (may throw to refuse); it is cleared after
+ * client: the agent client's name (MCP clientInfo), recorded as who made the VMs it makes (core/profile.mjs creatorLabel).
  * @typedef {{ host: HostProfile, current: string | null, currentHost: HostProfile | null, keeper: core.LeaseKeeper,
  *   adopt: (name: string, host: HostProfile) => void, clear: () => void, selectHost: (host: HostProfile) => void,
- *   removing?: (name: string, host: HostProfile) => Promise<void> | void }} Session
+ *   removing?: (name: string, host: HostProfile) => Promise<void> | void, client?: string }} Session
  */
 
 const where = `in a boxery VM (default: the current VM). Relative paths are under ${core.PROJECT}; ~ is ${core.REMOTE_HOME}.`;
@@ -411,7 +413,8 @@ export function callTarget(tool, args, s) {
  */
 export async function runTool(tool, args, s, ctx = {}) {
 	const { host, current, vm, args: a } = callTarget(tool, args, s);
-	return core.withHost(host, () => tool.run(/** @type {string} */ (vm), a, { ...ctx, session: s, host, current }));
+	const run = () => core.withHost(host, () => tool.run(/** @type {string} */ (vm), a, { ...ctx, session: s, host, current }));
+	return s.client ? withClient(s.client, run) : run();
 }
 
 /** vm_info hosts: the registered hosts, `host` marked current. @param {HostProfile} host @returns {ToolResult} */

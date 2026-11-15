@@ -151,7 +151,8 @@ test("restricted create and start skip root provisioning, proxy tokens and guest
 	await assert.rejects(createVm(rt, { ...args, layers: ["github-runner"] }), /--layers is not supported/);
 	assert.equal(await createVm(rt, args), "newbox newbox.openshell:22");
 	assert.equal(existsSync(`${dir}/conf/tokens.json`), false);
-	assert.deepEqual(vmRecord(db, "newbox"), { kind: "headless", os: "linux", size: null }, "no size: OpenShell's compute driver manages it");
+	const { created_at: _at, ...rec } = vmRecord(db, "newbox");
+	assert.deepEqual(rec, { kind: "headless", os: "linux", size: null, created_by: null }, "no size: OpenShell's compute driver manages it");
 	await start(rt, ["newbox"]);
 	db.close();
 });

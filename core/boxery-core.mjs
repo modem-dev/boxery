@@ -49,7 +49,7 @@ export { q } from "./shell.mjs";
 /** vm_grant arguments. @typedef {{ spec?: unknown, readonly?: boolean, reason?: unknown }} GrantRequestArgs */
 /** @typedef {"accept" | "decline" | "cancel"} ApprovalAnswer */
 /** @typedef {(message: string) => Promise<ApprovalAnswer | string>} Approve */
-/** A VM as `boxery ls --json` lists it (docs/cli.md); `addr` is from hosts before ssh_addr. @typedef {{ name: string, state?: string | null, ssh_addr?: string | null, addr?: string | null, disk_size?: number | null, disk_used?: number | null, tunnel?: string | null, lease?: { state?: string, [k: string]: any } | null, shape?: string | null, cpus?: number | null, mem?: number | null, desktop?: boolean, os?: string, grants?: Grant[], guest?: GuestInfo }} VmInfo */
+/** A VM as `boxery ls --json` lists it (docs/cli.md); `addr` is from hosts before ssh_addr. @typedef {{ name: string, state?: string | null, ssh_addr?: string | null, addr?: string | null, disk_size?: number | null, disk_used?: number | null, tunnel?: string | null, lease?: { state?: string, [k: string]: any } | null, shape?: string | null, cpus?: number | null, mem?: number | null, desktop?: boolean, os?: string, grants?: Grant[], guest?: GuestInfo, created_at?: number | null, created_by?: string | null, last_connected_at?: number | null }} VmInfo */
 /** Guest software status from the host's build records (docs/cli.md, `guest`). @typedef {{ status: string, reasons?: string[], built_at?: string | null, age_days?: number | null, [k: string]: any }} GuestInfo */
 /** @typedef {{ cpus: number, mem: number, disk: number }} Shape */
 /** @typedef {{ default?: string, shapes: Record<string, Shape> }} Shapes */
@@ -1180,14 +1180,24 @@ const fmtAddr = (/** @type {VmInfo} */ v) => (v.state === "running" && v.tunnel 
 const fmtDisk = (/** @type {VmInfo} */ v) => (v.disk_size == null && v.disk_used == null ? "-"
 	: `${v.disk_used == null ? "" : `${v.disk_used.toFixed(1)}/`}${v.disk_size ?? "?"}GiB`);
 
+/** How long ago an epoch-seconds time was, short: "just now", "45m ago", "5h ago", "3d ago"; "-" for none
+ *  (ls: last_connected_at). @param {number | null | undefined} at @param {number} [now] */
+export function ago(at, now = Date.now() / 1000) {
+	if (at == null) return "-";
+	const s = Math.max(0, now - at);
+	return s < 60 ? "just now" : `${s < 3600 ? `${Math.floor(s / 60)}m` : s < 172_800 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86_400)}d`} ago`;
+}
+
 /** Human-readable table for tools and /vm ls. @param {VmInfo[]} vms */
 export function formatVms(vms) {
 	if (!vms.length) return "(no VMs)";
+	// Hosts from before created_by/last_connected_at: no columns.
+	const usage = vms.some((v) => "last_connected_at" in v) ? (/** @type {VmInfo} */ v) => [ago(v.last_connected_at), v.created_by ?? "-"] : () => [];
 	const kind = (/** @type {VmInfo} */ v) => (v.desktop === false ? "headless" : "desktop"); // no field: a host from before headless VMs
 	const lease = (/** @type {VmInfo} */ v) => v.lease?.state?.toLowerCase() ?? "-"; // hosts from before lowercase lease states
 	const guest = vms.some((v) => v.guest) ? (/** @type {VmInfo} */ v) => [v.guest?.status ?? "-"] : () => []; // hosts from before build records: no column
-	const rows = [["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "LEASE", ...(vms.some((v) => v.guest) ? ["GUEST"] : []), "GRANTS"],
-		...vms.map((v) => [v.name, v.state ?? "-", fmtAddr(v), fmtDisk(v), v.shape ?? "-", kind(v), lease(v), ...guest(v), (v.grants ?? []).map(fmtGrant).join(",") || "-"])];
+	const rows = [["NAME", "STATE", "SSH", "DISK", "SHAPE", "KIND", "LEASE", ...(vms.some((v) => v.guest) ? ["GUEST"] : []), ...(vms.some((v) => "last_connected_at" in v) ? ["CONNECTED", "CREATED BY"] : []), "GRANTS"],
+		...vms.map((v) => [v.name, v.state ?? "-", fmtAddr(v), fmtDisk(v), v.shape ?? "-", kind(v), lease(v), ...guest(v), ...usage(v), (v.grants ?? []).map(fmtGrant).join(",") || "-"])];
 	const w = rows[0].map((_, i) => Math.max(...rows.map((r) => String(r[i]).length)));
 	const table = rows.map((r) => r.map((c, i) => (i === r.length - 1 ? c : String(c).padEnd(w[i]))).join("  ")).join("\n");
 	const outdated = vms.filter((v) => v.guest?.status === "outdated");
