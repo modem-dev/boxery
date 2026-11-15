@@ -113,6 +113,9 @@ __connect)
 	n=${2:-}; n=${n%.boxery}; port=${3:-22}
 	[[ $n =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "invalid name '$n' (use [a-z][a-z0-9-]*)"
 	[[ $port == 22 ]] || die "connect: only the ssh port is supported (forward other ports over ssh)"
+	# When NAME was last connected to, for ls (host/vm-records.mjs lastConnected): this file's mtime. Builtins only (no
+	# fork on this path), and never a reason to fail the connection.
+	{ echo >"$CONF/last-connected/$n" || { mkdir -p "$CONF/last-connected" && echo >"$CONF/last-connected/$n"; }; } 2>/dev/null || true
 	if declare -F backend_connect >/dev/null; then backend_connect "$n"; exit $?; fi
 	ep=$(backend_ssh_endpoint "$n")
 	exec nc "${ep% *}" "${ep#* }" ;;

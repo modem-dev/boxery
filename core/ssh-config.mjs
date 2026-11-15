@@ -39,8 +39,13 @@ export function checkTarget(t) {
 export const localHostBin = (hostBin, home) => (hostBin.startsWith("~/") ? `${home}/${hostBin.slice(2)}` : hostBin);
 const profileArgs = (/** @type {Target} */ t) => (t.hostProfile ? ` --profile ${t.hostProfile}` : "");
 /** The command ssh sends to a remote host for boxery-host ARGS. cli: how the person ran boxery, which the
- *  host's hints name (BOXERY_CLI: controller/lib.mjs invokedAs). @param {Target} t @param {string[]} args @param {string} [cli] */
-export const remoteCommand = (t, args, cli) => `exec ${cli ? `env BOXERY_CLI=${literal(cli)} ` : ""}${remotePath(t.hostBin)}${profileArgs(t)} ${literalArgs(args)}`;
+ *  host's hints name (BOXERY_CLI: controller/lib.mjs invokedAs). by: who is making a VM, which the host
+ *  records (BOXERY_BY: core/profile.mjs creatorLabel). A host that predates either ignores it.
+ *  @param {Target} t @param {string[]} args @param {string} [cli] @param {string} [by] */
+export const remoteCommand = (t, args, cli, by) => {
+	const env = [cli ? `BOXERY_CLI=${literal(cli)}` : "", by ? `BOXERY_BY=${literal(by)}` : ""].filter(Boolean);
+	return `exec ${env.length ? `env ${env.join(" ")} ` : ""}${remotePath(t.hostBin)}${profileArgs(t)} ${literalArgs(args)}`;
+};
 
 /**
  * The profile's ssh_config. leases: [{name, id}] (each lease's own key, in DIR/leases); agentVms: VMs

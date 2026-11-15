@@ -19,7 +19,7 @@ sql() { node --disable-warning=ExperimentalWarning -e 'const {DatabaseSync}=requ
 # run ARGS…: stdout → $tmp/out, stderr → $tmp/err (temp dir → TMP, timestamps → DATE), exit status → $rc
 run() {
 	rc=0; "$H" "$@" >"$tmp/out.raw" 2>"$tmp/err.raw" || rc=$?
-	for f in out err; do sed -E -e "s#$tmp#TMP#g" -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/DATE/g' -e 's/"checked_at":[0-9]+/"checked_at":EPOCH/g' -e 's/, [0-9]+s\)$/, Ns)/' -e 's/installed [0-9]+s after/installed Ns after/' "$tmp/$f.raw" >"$tmp/$f"; done
+	for f in out err; do sed -E -e "s#$tmp#TMP#g" -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/DATE/g' -e 's/"(checked_at|created_at)":[0-9]+/"\1":EPOCH/g' -e 's/, [0-9]+s\)$/, Ns)/' -e 's/installed [0-9]+s after/installed Ns after/' "$tmp/$f.raw" >"$tmp/$f"; done
 }
 # same DESC FILE EXPECTED_RC: compare $tmp/FILE with $tmp/expected, and $rc with EXPECTED_RC
 same() {
@@ -83,8 +83,8 @@ EOF
 run ls; same "ls" out 0
 cat >"$tmp/expected" <<'EOF'
 [
-{"name":"a1","state":"running","ssh_addr":"127.0.0.1:22000","disk_size":10,"disk_used":0.5,"tunnel":null,"lease":null,"shape":"custom","cpus":2,"mem":2048,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH}},
-{"name":"b2","state":"shut off","ssh_addr":null,"disk_size":40,"disk_used":0.5,"tunnel":null,"lease":null,"shape":"standard","cpus":4,"mem":8192,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH}}
+{"name":"a1","state":"running","ssh_addr":"127.0.0.1:22000","disk_size":10,"disk_used":0.5,"tunnel":null,"lease":null,"shape":"custom","cpus":2,"mem":2048,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH},"created_at":EPOCH,"created_by":null,"last_connected_at":null},
+{"name":"b2","state":"shut off","ssh_addr":null,"disk_size":40,"disk_used":0.5,"tunnel":null,"lease":null,"shape":"standard","cpus":4,"mem":8192,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH},"created_at":EPOCH,"created_by":null,"last_connected_at":null}
 ]
 EOF
 run ls --json; same "ls --json (one element per line)" out 0
@@ -133,8 +133,8 @@ run ip a1; same "ip" out 0
 sql "UPDATE vm_records SET shape=NULL, cpus=NULL, mem=NULL, disk=NULL" >/dev/null; mv "$BOXERY_FAKE_DIR/b2/size" "$tmp/b2.size"
 cat >"$tmp/expected" <<'EOF'
 [
-{"name":"a1","state":"running","ssh_addr":"127.0.0.1:22000","disk_size":10,"disk_used":0.5,"tunnel":null,"lease":{"state":"free","holder":null,"expires_at":null},"shape":"custom","cpus":2,"mem":2048,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH}},
-{"name":"b2","state":"shut off","ssh_addr":null,"disk_size":null,"disk_used":0.5,"tunnel":null,"lease":null,"shape":null,"cpus":null,"mem":null,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH}}
+{"name":"a1","state":"running","ssh_addr":"127.0.0.1:22000","disk_size":10,"disk_used":0.5,"tunnel":null,"lease":{"state":"free","holder":null,"expires_at":null},"shape":"custom","cpus":2,"mem":2048,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH},"created_at":EPOCH,"created_by":null,"last_connected_at":null},
+{"name":"b2","state":"shut off","ssh_addr":null,"disk_size":null,"disk_used":0.5,"tunnel":null,"lease":null,"shape":null,"cpus":null,"mem":null,"desktop":true,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH},"created_at":EPOCH,"created_by":null,"last_connected_at":null}
 ]
 EOF
 run ls --json; same "ls --json: pool lease object; sizes from the backend for VMs without a record, nulls if unreadable" out 0
@@ -189,7 +189,7 @@ EOF
 same "new --headless logs the layers it installs" err 0
 run ls --json
 grep -F '"name":"h3"' "$tmp/out" >"$tmp/h3.json" || true
-echo '{"name":"h3","state":"running","ssh_addr":"127.0.0.1:22002","disk_size":40,"disk_used":0.5,"tunnel":null,"lease":null,"shape":"standard","cpus":4,"mem":8192,"desktop":false,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH}}' >"$tmp/expected"
+echo '{"name":"h3","state":"running","ssh_addr":"127.0.0.1:22002","disk_size":40,"disk_used":0.5,"tunnel":null,"lease":null,"shape":"standard","cpus":4,"mem":8192,"desktop":false,"os":"linux","guest":{"status":"unknown","reasons":["no build record"],"built_at":null,"age_days":null,"kernel":null,"chrome":null,"playwright_core":null,"reboot_required":false,"checked_at":EPOCH},"created_at":EPOCH,"created_by":null,"last_connected_at":null}' >"$tmp/expected"
 same "ls --json: a headless VM has desktop false" h3.json 0
 run ls
 grep '^h3 ' "$tmp/out" >"$tmp/h3.txt" || true

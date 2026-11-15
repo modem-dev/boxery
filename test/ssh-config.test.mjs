@@ -71,6 +71,10 @@ test("checkTarget and remoteCommand", () => {
 	assert.equal(S.remoteCommand(t, ["snap", "x; rm -rf /"]), `exec "$HOME"/'bin/boxery host' --profile iso 'snap' 'x; rm -rf /'`);
 	assert.equal(S.remoteCommand(t, ["images"], "boxery --host lab"), `exec env BOXERY_CLI='boxery --host lab' "$HOME"/'bin/boxery host' --profile iso 'images'`, "how boxery was run, for the host's hints");
 	assert.equal(execFileSync("sh", ["-c", `${S.remoteCommand({ ...t, hostBin: "/usr/bin/env", hostProfile: "" }, [], "boxery --host lab").replace(/^exec /, "")} | grep '^BOXERY_CLI='`], { encoding: "utf8" }), "BOXERY_CLI=boxery --host lab\n");
+	assert.equal(S.remoteCommand(t, ["new", "a"], "", "ben@mac via x"), `exec env BOXERY_BY='ben@mac via x' "$HOME"/'bin/boxery host' --profile iso 'new' 'a'`, "who is making a VM, for the host's record");
+	const by = "o'brien@mac via $(touch NEVER) `id`";
+	assert.equal(execFileSync("sh", ["-c", `${S.remoteCommand({ ...t, hostBin: "/usr/bin/env", hostProfile: "" }, [], "boxery", by).replace(/^exec /, "")} | grep '^BOXERY_'`], { encoding: "utf8" }),
+		`BOXERY_CLI=boxery\nBOXERY_BY=${by}\n`, "the label reaches the host as it is, never run");
 	assert.throws(() => S.checkTarget({ ...t, host: "-oProxyCommand=x" }), /invalid ssh destination/);
 	assert.throws(() => S.checkTarget({ ...t, host: "a b" }), /invalid ssh destination/);
 	assert.throws(() => S.checkTarget({ ...t, hostBin: "-x" }), /invalid host executable/);

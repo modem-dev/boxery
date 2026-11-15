@@ -36,6 +36,8 @@ import {
 import * as core from "../core/boxery-core.mjs";
 // @ts-ignore: the vm_* tool table the MCP server is built from too
 import { callTarget, HOST_PARAM, hostsResult, runTool, sameHost, TOOLS, VM_PARAM } from "../core/boxery-tools.mjs";
+// @ts-ignore: shared core module
+import { setClient } from "../core/profile.mjs";
 
 const { PROJECT, q } = core;
 type HostProfile = ReturnType<typeof core.resolveHost>;
@@ -80,6 +82,7 @@ function toPi(r: { text?: string; image?: { data: string; mimeType: string }; is
 // ---------------------------------------------------------------- extension
 
 export default function (pi: ExtensionAPI) {
+	setClient("pi"); // VMs made here are recorded as made "via pi" (ls: created_by)
 	pi.registerFlag("vm", {
 		description: 'boxery: current VM NAME (created if missing), "new" for a throwaway VM, or "pool" to lease one from the shared pool',
 		type: "string",

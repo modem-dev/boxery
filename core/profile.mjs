@@ -2,6 +2,7 @@
 // ssh_config and shared ssh connections. The ssh_config text and quoting are core/ssh-config.mjs.
 // Used by the CLI (controller/), the MCP server and the pi extension alike.
 // (Imports boxery-core, which imports this module through leases/grants: fine while nothing here runs at load.)
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os, { homedir } from "node:os";
@@ -77,14 +78,33 @@ export async function stopHostCommands(sig) {
 	await Promise.race([Promise.all(all.map((c) => new Promise((r) => (c.exitCode !== null || c.signalCode !== null ? r(undefined) : c.once("close", r))))), new Promise((r) => setTimeout(r, 5000).unref())]);
 }
 
-/** The process that runs boxery-host ARGS on the profile's host: [command, argv] (spawn it with config.env).
+// Who makes a VM, as the host records it (created_by in ls): user@machine, and "via CLIENT" when an agent
+// client did (the MCP client's name, or pi). A front-end serving one client says so with setClient; the
+// MCP server, which may serve several sessions, runs each call withClient.
+const clientContext = /** @type {AsyncLocalStorage<string>} */ (new AsyncLocalStorage());
+let processClient = "";
+const cleanClient = (/** @type {unknown} */ name) => (typeof name === "string" ? name.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 40) : "");
+/** The agent client this process serves. @param {unknown} name */
+export function setClient(name) { processClient = cleanClient(name); }
+/** Run FN with CLIENT as the agent client. @template T @param {unknown} client @param {() => T} fn @returns {T} */
+export const withClient = (client, fn) => clientContext.run(cleanClient(client), fn);
+/** "user@machine", or "user@machine via CLIENT" for an agent client. */
+export function creatorLabel() {
+	const client = clientContext.getStore() || processClient;
+	return `${os.userInfo().username || process.env.USER || "user"}@${os.hostname().split(".")[0]}${client ? ` via ${client}` : ""}`;
+}
+// Only commands that make VMs carry the label.
+const CREATES = ["new", "fork"];
+
+/** The process that runs boxery-host ARGS on the profile's host: [command, argv, env] (spawn it with env).
  *  Checks the target first. @param {HostProfile} host @param {ProfileConfig} c @param {string[]} args
- *  @returns {[string, string[]]} */
+ *  @returns {[string, string[], NodeJS.ProcessEnv]} */
 export function hostCommand(host, c, args) {
 	needHost(host, c);
+	const by = CREATES.includes(args[0]) ? creatorLabel() : "";
 	return c.host === "local"
-		? [localHostBin(c.hostBin, c.env.HOME ?? homedir()), [...(c.hostProfile ? ["--profile", c.hostProfile] : []), ...args]]
-		: ["ssh", ["-o", "LogLevel=ERROR", "--", c.host, remoteCommand(c, args, c.env.BOXERY_CLI)]]; // (a local host inherits it)
+		? [localHostBin(c.hostBin, c.env.HOME ?? homedir()), [...(c.hostProfile ? ["--profile", c.hostProfile] : []), ...args], by ? { ...c.env, BOXERY_BY: by } : c.env]
+		: ["ssh", ["-o", "LogLevel=ERROR", "--", c.host, remoteCommand(c, args, c.env.BOXERY_CLI, by)], c.env]; // (a local host inherits BOXERY_CLI)
 }
 
 /** raw: stdout as is (default: trimmed). config: the profile's, already loaded. onData: every chunk of
@@ -105,9 +125,9 @@ export function hostCommand(host, c, args) {
  */
 export async function hostRun(args, { input, signal, host = currentHost(), timeout = 120_000, stdin = "pipe", stdout = "pipe", stderr = "pipe", raw = false, config, onData } = {}) {
 	const c = config ?? await profileConfig(host, { signal });
-	const [cmd, argv] = hostCommand(host, c, args);
+	const [cmd, argv, env] = hostCommand(host, c, args);
 	return new Promise((resolve, reject) => {
-		const child = spawn(cmd, argv, { stdio: [stdin, stdout, stderr], signal, env: c.env });
+		const child = spawn(cmd, argv, { stdio: [stdin, stdout, stderr], signal, env });
 		running.add(child); child.once("close", () => running.delete(child)); child.once("error", () => running.delete(child));
 		// Our own timer, not spawn's: that one is never cleared when the command can't start (ENOENT), and
 		// would hold this process open for the whole timeout.

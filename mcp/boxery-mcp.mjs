@@ -314,6 +314,8 @@ async function handle(session, msg, notify) {
 			case "initialize": {
 				const want = params?.protocolVersion;
 				session.protocolVersion = PROTOCOL_VERSIONS.includes(want) ? want : PROTOCOL_VERSIONS[0];
+				// Recorded as who made the VMs this session makes (ls: created_by "user@machine via NAME").
+				if (typeof params?.clientInfo?.name === "string") session.client = params.clientInfo.name;
 				session.ui = has("--ui") || !!params?.capabilities?.extensions?.[UI_EXT]?.mimeTypes?.includes(UI_MIME);
 				// Form elicitation: `elicitation: {}` (2025-06-18; form is implied) or `{form: {}, …}`.
 				const el = params?.capabilities?.elicitation;

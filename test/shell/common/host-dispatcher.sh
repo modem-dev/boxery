@@ -29,7 +29,7 @@ expect_fail "new before build-base fails" "$H" new a1
 expect "build-base" "$H" build-base
 echo "ssh-ed25519 AAAAlaptop me@laptop" | "$H" add-key >/dev/null 2>&1 && ok "add-key" || bad add-key
 expect_fail "add-key rejects non-keys" bash -c "echo hello | '$H' add-key"
-out=$("$H" new a1 --cpus 2 --mem 2048 --disk 10 2>/dev/null) && [[ $out =~ ^a1\ 127\.0\.0\.1:22[0-9]{3}$ ]] && ok "new prints NAME ADDR" || bad "new: $out"
+out=$(BOXERY_BY=$'ben@mac via claude-code\e[0m' "$H" new a1 --cpus 2 --mem 2048 --disk 10 2>/dev/null) && [[ $out =~ ^a1\ 127\.0\.0\.1:22[0-9]{3}$ ]] && ok "new prints NAME ADDR" || bad "new: $out"
 [[ $(cat "$BOXERY_FAKE_DIR/a1/size") == "2 2048 10" ]] && ok "new passes sizes to backend" || bad "sizes"
 ud=$BOXERY_FAKE_DIR/a1/user-data
 grep -q '^#cloud-config' "$ud" && grep -q '^hostname: a1$' "$ud" && ok "seed is cloud-config with hostname" || bad "seed header"
@@ -41,7 +41,9 @@ echo "$b64" | base64 -d | jq -e '.providers["openai-codex"].baseUrl == "http://1
 expect_fail "duplicate name rejected" "$H" new a1
 for n in A1 1a 'a;b' '../x' "$(printf 'a%.0s' {1..32})"; do expect_fail "invalid name '$n' rejected" "$H" new "$n"; done
 "$H" ls | grep -Eq '^a1 *running *127.0.0.1:22[0-9]* .* - +[a-z]+$' && ok "ls (LEASE column '-' for pets)" || bad "ls: $("$H" ls)"
-"$H" ls --json | jq -e 'length == 1 and .[0] == {name: "a1", state: "running", ssh_addr: .[0].ssh_addr, disk_size: 10, disk_used: 0.5, tunnel: null, lease: null, shape: "custom", cpus: 2, mem: 2048, desktop: true, os: "linux", guest: .[0].guest} and (.[0].guest.status | IN("current", "outdated", "unknown")) and (.[0].ssh_addr | test("^127\\.0\\.0\\.1:22[0-9]+$"))' >/dev/null && ok "ls --json" || bad "ls --json: $("$H" ls --json)"
+"$H" ls --json | jq -e --argjson now "$(date +%s)" 'length == 1 and .[0] == {name: "a1", state: "running", ssh_addr: .[0].ssh_addr, disk_size: 10, disk_used: 0.5, tunnel: null, lease: null, shape: "custom", cpus: 2, mem: 2048, desktop: true, os: "linux", guest: .[0].guest,
+	created_at: .[0].created_at, created_by: "ben@mac via claude-code[0m", last_connected_at: null} and (.[0].guest.status | IN("current", "outdated", "unknown")) and (.[0].ssh_addr | test("^127\\.0\\.0\\.1:22[0-9]+$"))
+	and (.[0].created_at | . > $now - 300 and . <= $now + 1)' >/dev/null && ok "ls --json (created_by from BOXERY_BY, control characters dropped; never connected: last_connected_at null)" || bad "ls --json: $("$H" ls --json)"
 [[ $("$H" ip a1) == 127.0.0.1 ]] && ok "ip" || bad ip
 expect "stop" "$H" stop a1
 expect_fail "ip of stopped VM fails" "$H" ip a1
@@ -53,7 +55,15 @@ expect_fail "snaps --json of unknown VM fails" "$H" snaps nope --json
 expect "revert" "$H" revert a1 s1
 expect_fail "revert to unknown snapshot fails" "$H" revert a1 nope
 expect_fail "connect rejects non-ssh ports" "$H" connect a1 80
+# connect records when a VM was last connected to: last-connected/NAME's mtime, read by ls --json (nc stubbed: no VM listens).
+printf '#!/bin/sh\nexit 0\n' >"$tmp/bin/nc"; chmod +x "$tmp/bin/nc"
+"$H" connect a1 </dev/null >/dev/null 2>&1 && [[ -f $BOXERY_CONF/last-connected/a1 ]] && ok "connect records the VM's last connection" || bad "connect: no last-connected file"
+used=$("$H" ls --json | jq '.[0].last_connected_at') && (( used > $(date +%s) - 300 )) && ok "ls --json: last_connected_at after a connection" || bad "last_connected_at: $used"
+chmod 500 "$BOXERY_CONF/last-connected"
+"$H" connect a1 </dev/null >/dev/null 2>&1 && ok "connect still connects when it can't record" || bad "connect failed on an unwritable last-connected"
+chmod 700 "$BOXERY_CONF/last-connected"
 expect "rm" "$H" rm a1
+[[ ! -e $BOXERY_CONF/last-connected/a1 ]] && ok "rm forgets the VM's last connection" || bad "last-connected/a1 left behind"
 [[ $("$H" ls --json) == '[]' ]] && ok "ls --json with no VMs → []" || bad "ls --json empty: $("$H" ls --json)"
 jq -e 'has("a1") | not' "$BOXERY_CONF/tokens.json" >/dev/null && ok "rm revokes the proxy token" || bad "token not revoked"
 expect_fail "rm of unknown VM fails" "$H" rm a1

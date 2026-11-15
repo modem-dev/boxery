@@ -22,7 +22,7 @@ exec sh -c "$*"
 chmodSync(path.join(bin, "ssh"), 0o755);
 // boxery-host: records argv (one per line), echoes stdin back, exits with $EXIT.
 const hostbin = path.join(dir, "host bin's");
-writeFileSync(hostbin, `#!/bin/sh\nfor a; do printf 'arg[%s]\\n' "$a"; done >> ${JSON.stringify(calls)}\n[ -z "$STUB_ENV" ] || echo "env $STUB_ENV" >> ${JSON.stringify(calls)}\n[ "$1" != --profile ] || shift 2\ncase "$1" in help) echo '  known-hosts NAME' ;; fail) echo 'it broke' >&2; exit 3 ;; sleepy) exec sleep 10 ;; daemon) (sleep 3; :) & echo started ;; slowtail) echo first; (sleep 0.5; echo late) & ;; chatty) echo started; (i=0; while [ $i -lt 50 ]; do echo noise; sleep 0.3; i=$((i + 1)); done) & ;; *) cat ;; esac\n`);
+writeFileSync(hostbin, `#!/bin/sh\nfor a; do printf 'arg[%s]\\n' "$a"; done >> ${JSON.stringify(calls)}\n[ -z "$STUB_ENV" ] || echo "env $STUB_ENV" >> ${JSON.stringify(calls)}\n[ -z "$BOXERY_BY" ] || echo "by $BOXERY_BY" >> ${JSON.stringify(calls)}\n[ "$1" != --profile ] || shift 2\ncase "$1" in help) echo '  known-hosts NAME' ;; fail) echo 'it broke' >&2; exit 3 ;; sleepy) exec sleep 10 ;; daemon) (sleep 3; :) & echo started ;; slowtail) echo first; (sleep 0.5; echo late) & ;; chatty) echo started; (i=0; while [ $i -lt 50 ]; do echo noise; sleep 0.3; i=$((i + 1)); done) & ;; *) cat ;; esac\n`);
 chmodSync(hostbin, 0o755);
 process.env.PATH = `${bin}:${process.env.PATH}`;
 process.env.BOXERY_HOME = home;
@@ -72,6 +72,39 @@ test("hostRun: HOST=local runs boxery-host directly, with --profile, stdin and t
 	abort.abort();
 	await assert.rejects(slow, (e) => /** @type {Error} */ (e).name === "AbortError" && !(/** @type {any} */ (e).fromHost));
 	await assert.rejects(P.hostRun(["sleepy"], { host, timeout: 100 }), (e) => /** @type {any} */ (e).fromHost === true && /signal SIGTERM/.test(/** @type {Error} */ (e).message));
+});
+
+test("new and fork tell the host who is making the VM: user@machine, via the agent client of the call or process", async () => {
+	writeFileSync(path.join(home, "config"), `HOST=local\nHOST_BIN=${q(hostbin)}\n`);
+	const me = P.creatorLabel();
+	assert.match(me, /^[^@\s]+@[^.\s]+$/, "the CLI: user@machine");
+	await P.hostRun(["new", "a"], { host, input: "" });
+	await P.hostRun(["ls"], { host, input: "" });
+	assert.deepEqual(log(), ["arg[new]", "arg[a]", `by ${me}`, "arg[ls]"], "only commands that make VMs carry it");
+	rmSync(calls, { force: true });
+	P.setClient("pi");
+	try {
+		assert.equal(P.creatorLabel(), `${me} via pi`);
+		await P.withClient("claude-code\u001b[1m", () => P.hostRun(["fork", "a", "b"], { host, input: "" }));
+		assert.deepEqual(log(), ["arg[fork]", "arg[a]", "arg[b]", `by ${me} via claude-code[1m`], "a call's client wins over the process's; control characters dropped");
+	} finally { P.setClient(""); }
+	// A remote host gets it on the command line, next to BOXERY_CLI.
+	mkdirSync(path.join(dir, "rhome"), { recursive: true });
+	writeFileSync(path.join(dir, "rhome", "boxery host"), readFileSync(hostbin)); chmodSync(path.join(dir, "rhome", "boxery host"), 0o755);
+	writeFileSync(path.join(home, "config"), `HOST=u@h\nHOST_BIN=${q("~/boxery host")}\n`);
+	rmSync(calls, { force: true });
+	const HOME = process.env.HOME;
+	process.env.HOME = path.join(dir, "rhome");
+	try { await P.withClient("codex", () => P.hostRun(["new", "c"], { host, input: "" })); } finally { process.env.HOME = HOME; }
+	assert.deepEqual(log(), ["ssh-dest u@h", "arg[new]", "arg[c]", `by ${me} via codex`]);
+});
+
+test("runTool runs a call as its session's agent client (MCP clientInfo)", async () => {
+	const { runTool } = await import("../core/boxery-tools.mjs");
+	const tool = { noVm: true, run: async () => ({ text: P.creatorLabel() }) };
+	const session = /** @type {any} */ ({ host, current: null, currentHost: null });
+	assert.equal((await runTool(tool, {}, session)).text, P.creatorLabel(), "no client: user@machine");
+	assert.equal((await runTool(tool, {}, { ...session, client: "claude-code" })).text, `${P.creatorLabel()} via claude-code`);
 });
 
 test("hostRun: a remote host gets exactly these words, whatever they contain", async () => {
